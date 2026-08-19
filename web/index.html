@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="ru" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Тросовая система</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>
+  /* тема ставится до первой отрисовки, иначе панель моргает белым */
+  try { document.documentElement.dataset.theme = localStorage.getItem("cdpr-theme") || "auto"; }
+  catch (e) { /* приватный режим — остаётся авто */ }
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round">
+        <path d="M3.5 4.5 12 15M20.5 4.5 12 15M3.5 4.5h17"/>
+        <circle cx="3.5" cy="4.5" r="1.5" fill="currentColor" stroke="none"/>
+        <circle cx="20.5" cy="4.5" r="1.5" fill="currentColor" stroke="none"/>
+        <rect x="8.5" y="15" width="7" height="4.5" rx="1.2"/>
+      </svg>
+    </span>
+    <span class="brand-text">
+      <b id="machine-name">Тросовая система</b>
+      <small id="machine-sub">подключение…</small>
+    </span>
+    <span id="sim-badge" class="badge hidden">МОДЕЛЬ</span>
+    <span id="calib-badge" class="badge attention hidden">НЕ ОТКАЛИБРОВАНА</span>
+  </div>
+
+  <div class="status">
+    <span class="chip" id="chip-link"><i class="led"></i>связь</span>
+    <span class="chip" id="chip-mode">режим —</span>
+    <span class="chip" id="chip-health"><i class="led"></i>—</span>
+    <span class="chip mono" id="chip-rate">— Гц</span>
+  </div>
+
+  <button id="theme-toggle" class="icon-btn" title="Тема: по системе" aria-label="Переключить тему">
+    <svg class="ico ico-auto" viewBox="0 0 24 24" width="17" height="17" fill="none"
+         stroke="currentColor" stroke-width="1.7">
+      <circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor" stroke="none"/>
+    </svg>
+    <svg class="ico ico-light" viewBox="0 0 24 24" width="17" height="17" fill="none"
+         stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+      <circle cx="12" cy="12" r="4.2"/>
+      <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/>
+    </svg>
+    <svg class="ico ico-dark" viewBox="0 0 24 24" width="17" height="17">
+      <path d="M20.3 14.6A8.6 8.6 0 0 1 9.4 3.7a8.6 8.6 0 1 0 10.9 10.9Z" fill="currentColor"/>
+    </svg>
+  </button>
+
+  <button id="estop" class="estop" title="Аварийный стоп">
+    <span class="estop-face">АВАРИЙНЫЙ<br>СТОП</span>
+  </button>
+</header>
+
+<div id="banner" class="flash hidden">
+  <svg viewBox="0 0 16 16" width="16" height="16" class="flash-ico" fill="currentColor">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm1 6a1 1 0 1 0-2 0 1 1 0 0 0 2 0Z"/>
+  </svg>
+  <div id="banner-text"></div>
+  <button id="banner-close" class="flash-close" aria-label="Скрыть">✕</button>
+</div>
+
+<main>
+  <!-- ================== поле ================== -->
+  <section class="panel viewport">
+    <div class="panel-head">
+      <div class="seg" id="view-seg">
+        <button class="tab active" data-view="top">Вид сверху</button>
+        <button class="tab" data-view="side">Вид сбоку</button>
+      </div>
+      <span class="spacer"></span>
+      <label class="switch">
+        <input type="checkbox" id="show-workspace" checked><span class="track"></span>рабочая зона
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="show-path"><span class="track"></span>путь программы
+      </label>
+    </div>
+
+    <div class="canvas-wrap">
+      <canvas id="field"></canvas>
+      <div class="hud hud-cursor mono" id="cursor-readout"></div>
+      <div class="hud hud-legend">
+        <span><i class="dot anchor"></i>якорь</span>
+        <span><i class="dot platform"></i>платформа</span>
+        <span><i class="dot target"></i>цель</span>
+      </div>
+    </div>
+
+    <div class="dro">
+      <div class="axis">
+        <span class="axis-name">X</span>
+        <b class="axis-value mono" id="pos-x">———</b>
+        <small class="axis-target mono" id="tgt-x">цель —</small>
+      </div>
+      <div class="axis">
+        <span class="axis-name">Y</span>
+        <b class="axis-value mono" id="pos-y">———</b>
+        <small class="axis-target mono" id="tgt-y">цель —</small>
+      </div>
+      <div class="axis">
+        <span class="axis-name">Z</span>
+        <b class="axis-value mono" id="pos-z">———</b>
+        <small class="axis-target mono" id="tgt-z">цель —</small>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><span>невязка</span><b class="mono" id="pos-res">—</b></div>
+      <div class="metric"><span>запас</span><b class="mono" id="margin">—</b></div>
+      <div class="metric"><span>приводы</span><b id="drives-state">—</b></div>
+      <div class="metric"><span>цикл</span><b class="mono" id="cycle">—</b></div>
+    </div>
+  </section>
+
+  <!-- ================== боковая колонка ================== -->
+  <section class="panel side">
+    <nav class="tabs">
+      <button class="tab active" data-tab="control">Управление</button>
+      <button class="tab" data-tab="gcode">Программа</button>
+      <button class="tab" data-tab="calib">Калибровка</button>
+      <button class="tab" data-tab="settings">Настройки</button>
+      <button class="tab" data-tab="log">Журнал</button>
+    </nav>
+
+    <!-- ---------- управление ---------- -->
+    <div class="tabpage active" id="tab-control">
+      <div class="power">
+        <button id="btn-enable" class="btn primary big">Разрешить приводы</button>
+        <button id="btn-idle" class="btn big">Стоп</button>
+      </div>
+
+      <section class="block">
+        <h3>Ручное перемещение</h3>
+        <div class="jog">
+          <div class="jogpad">
+            <button class="j diag" data-jog="-1,1,0" title="−X +Y">◤</button>
+            <button class="j" data-jog="0,1,0">Y<b>+</b></button>
+            <button class="j diag" data-jog="1,1,0" title="+X +Y">◥</button>
+            <button class="j" data-jog="-1,0,0">X<b>−</b></button>
+            <button class="j home" id="jog-home" title="подставить центр поля и лучшую высоту">⌂</button>
+            <button class="j" data-jog="1,0,0">X<b>+</b></button>
+            <button class="j diag" data-jog="-1,-1,0" title="−X −Y">◣</button>
+            <button class="j" data-jog="0,-1,0">Y<b>−</b></button>
+            <button class="j diag" data-jog="1,-1,0" title="+X −Y">◢</button>
+          </div>
+          <div class="jogz">
+            <button class="j" data-jog="0,0,1">Z<b>+</b></button>
+            <button class="j" data-jog="0,0,-1">Z<b>−</b></button>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <span class="field-label">Шаг, мм</span>
+          <div class="seg grow" id="steps">
+            <button data-step="hold" title="пока держите кнопку — платформа едет">УДЕРЖ.</button>
+            <button data-step="0.5">0.5</button>
+            <button data-step="1">1</button>
+            <button data-step="10" class="active">10</button>
+            <button data-step="50">50</button>
+            <button data-step="200">200</button>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <span class="field-label">Подача</span>
+          <input id="jog-feed" type="range" min="1" max="200" step="1" value="60">
+          <b class="mono value" id="jog-feed-value">60 мм/с</b>
+        </div>
+
+        <p class="hint">
+          <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> — X и Y,
+          <kbd>PgUp</kbd><kbd>PgDn</kbd> — Z, <kbd>1</kbd>…<kbd>6</kbd> — шаг,
+          <kbd>Esc</kbd> — стоп. Пока курсор в поле ввода, клавиши не работают.
+        </p>
+      </section>
+
+      <section class="block">
+        <h3>Ввод координат</h3>
+        <div class="mdi">
+          <label class="field"><span>X, мм</span><input id="mdi-x" type="number" step="1"></label>
+          <label class="field"><span>Y, мм</span><input id="mdi-y" type="number" step="1"></label>
+          <label class="field"><span>Z, мм</span><input id="mdi-z" type="number" step="1"></label>
+          <label class="field"><span>подача, мм/с</span><input id="mdi-f" type="number" step="10" value="100"></label>
+        </div>
+        <div class="row">
+          <button id="mdi-here" class="btn">Взять текущие</button>
+          <button id="mdi-go" class="btn primary grow">Ехать</button>
+        </div>
+      </section>
+
+      <section class="block">
+        <h3>Натяжение</h3>
+        <div class="field-row">
+          <span class="field-label">Цель</span>
+          <input id="tension-slider" type="range" min="5" max="120" step="1" value="30">
+          <b class="mono value" id="tension-value">30 Н</b>
+        </div>
+        <p class="hint">цель для самого ненагруженного троса</p>
+        <div class="cables" id="cables"></div>
+        <div class="row">
+          <button id="btn-autotension" class="btn">Выбрать слабину</button>
+          <button id="btn-handguide" class="btn toggle">Вести за руку</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- программа ---------- -->
+    <div class="tabpage" id="tab-gcode">
+      <div class="cnc-bar">
+        <button id="gcode-run" class="cnc start" disabled><i></i>ПУСК</button>
+        <button id="gcode-pause" class="cnc hold" disabled><i></i>ПАУЗА</button>
+        <button id="gcode-stop" class="cnc halt" disabled><i></i>СТОП</button>
+      </div>
+
+      <div class="progress"><div id="gcode-bar"></div></div>
+      <div class="progress-meta">
+        <span id="gcode-progress-text">программа не загружена</span>
+        <span class="mono" id="gcode-eta"></span>
+      </div>
+
+      <div class="field-row">
+        <span class="field-label">Коррекция</span>
+        <input id="gcode-override" type="range" min="10" max="200" step="5" value="100">
+        <b class="mono value" id="gcode-override-value">100 %</b>
+      </div>
+
+      <div class="editor">
+        <div class="gutter mono" id="gcode-gutter">1</div>
+        <textarea id="gcode-text" spellcheck="false" placeholder="G21 G90&#10;F3000&#10;G1 X2500 Y2000 Z1000&#10;G1 X3500&#10;G1 Y3000&#10;G1 X2500&#10;G1 Y2000"></textarea>
+      </div>
+
+      <div class="row">
+        <label class="btn" for="gcode-file">Открыть файл</label>
+        <input type="file" id="gcode-file" accept=".gcode,.nc,.txt" class="sr-only">
+        <button id="gcode-check" class="btn primary grow">Проверить</button>
+      </div>
+      <pre id="gcode-report" class="report"></pre>
+    </div>
+
+    <!-- ---------- калибровка ---------- -->
+    <div class="tabpage" id="tab-calib">
+      <p class="hint">Платформа опускается до касания опоры; касание видно по
+        одновременному падению натяжения на всех тросах. Координаты репера
+        задаются вручную — их точность и определяет точность системы.</p>
+      <div class="mdi">
+        <label class="field"><span>X, мм</span><input id="probe-x" type="number" step="1"></label>
+        <label class="field"><span>Y, мм</span><input id="probe-y" type="number" step="1"></label>
+        <label class="field"><span>Z, мм</span><input id="probe-z" type="number" step="1" value="60"></label>
+      </div>
+      <div class="row">
+        <button id="probe-go" class="btn primary grow">Опустить до касания</button>
+        <button id="probe-accept" class="btn">Записать точку</button>
+      </div>
+      <div class="row">
+        <button id="calib-solve" class="btn grow">Рассчитать</button>
+        <button id="calib-apply" class="btn grow">Рассчитать и сохранить</button>
+        <button id="calib-clear" class="btn danger">Очистить</button>
+      </div>
+      <pre id="calib-report" class="report"></pre>
+    </div>
+
+    <!-- ---------- настройки ---------- -->
+    <div class="tabpage" id="tab-settings">
+      <div class="row">
+        <button id="settings-reload" class="btn">Обновить</button>
+        <span class="hint grow">правки сохраняются в machine.yaml, комментарии в файле остаются</span>
+      </div>
+      <div id="settings-body"></div>
+    </div>
+
+    <!-- ---------- журнал ---------- -->
+    <div class="tabpage" id="tab-log">
+      <div class="row">
+        <button id="log-clear" class="btn">Очистить</button>
+        <span class="hint grow">последние события сверху</span>
+      </div>
+      <pre id="log" class="report log"></pre>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

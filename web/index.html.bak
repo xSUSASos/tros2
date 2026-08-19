@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Тросовая система</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <b id="machine-name">Тросовая система</b>
+    <span id="sim-badge" class="badge hidden">МОДЕЛЬ</span>
+    <span id="calib-badge" class="badge warn hidden">НЕ ОТКАЛИБРОВАНА</span>
+  </div>
+  <div class="status">
+    <span class="chip" id="chip-mode">режим —</span>
+    <span class="chip" id="chip-health">—</span>
+    <span class="chip" id="chip-rate">— Гц</span>
+  </div>
+  <button id="estop" class="estop">АВАРИЙНЫЙ<br>СТОП</button>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main>
+  <section class="panel view">
+    <div class="tabs">
+      <button class="tab active" data-view="top">Вид сверху</button>
+      <button class="tab" data-view="side">Вид сбоку</button>
+      <label class="inline"><input type="checkbox" id="show-workspace" checked> рабочая зона</label>
+      <label class="inline"><input type="checkbox" id="show-path"> путь G-code</label>
+    </div>
+    <canvas id="field" width="900" height="640"></canvas>
+    <div class="readout">
+      <div><span>X</span><b id="pos-x">—</b></div>
+      <div><span>Y</span><b id="pos-y">—</b></div>
+      <div><span>Z</span><b id="pos-z">—</b></div>
+      <div><span>невязка</span><b id="pos-res">—</b></div>
+      <div><span>запас</span><b id="margin">—</b></div>
+    </div>
+  </section>
+
+  <section class="panel side">
+    <div class="tabs">
+      <button class="tab active" data-tab="control">Управление</button>
+      <button class="tab" data-tab="gcode">G-code</button>
+      <button class="tab" data-tab="calib">Калибровка</button>
+      <button class="tab" data-tab="settings">Настройки</button>
+      <button class="tab" data-tab="log">Журнал</button>
+    </div>
+
+    <div class="tabpage active" id="tab-control">
+      <div class="row">
+        <button id="btn-enable" class="big">Разрешить приводы</button>
+        <button id="btn-idle" class="big ghost">Стоп</button>
+      </div>
+
+      <h3>Джог</h3>
+      <div class="jog">
+        <div class="pad">
+          <button data-jog="0,1,0" class="j up">▲<small>+Y</small></button>
+          <button data-jog="-1,0,0" class="j left">◀<small>−X</small></button>
+          <button id="jog-home" class="j home">⌂</button>
+          <button data-jog="1,0,0" class="j right">▶<small>+X</small></button>
+          <button data-jog="0,-1,0" class="j down">▼<small>−Y</small></button>
+        </div>
+        <div class="zcol">
+          <button data-jog="0,0,1" class="j">▲<small>+Z</small></button>
+          <button data-jog="0,0,-1" class="j">▼<small>−Z</small></button>
+        </div>
+      </div>
+      <div class="steps" id="steps">
+        <button data-step="0.5">0.5</button>
+        <button data-step="1">1</button>
+        <button data-step="10" class="active">10</button>
+        <button data-step="50">50</button>
+        <button data-step="200">200</button>
+        <span class="unit">мм</span>
+      </div>
+
+      <h3>Ввод координат</h3>
+      <div class="mdi">
+        <label>X <input id="mdi-x" type="number" step="1"></label>
+        <label>Y <input id="mdi-y" type="number" step="1"></label>
+        <label>Z <input id="mdi-z" type="number" step="1"></label>
+        <label>подача <input id="mdi-f" type="number" step="10" value="100"><span class="unit">мм/с</span></label>
+        <button id="mdi-go">Ехать</button>
+      </div>
+
+      <h3>Натяжение</h3>
+      <div class="tension">
+        <div class="slider">
+          <input id="tension-slider" type="range" min="5" max="120" step="1" value="30">
+          <span id="tension-value">30 Н</span>
+        </div>
+        <div class="hint">цель для самого ненагруженного троса</div>
+        <div id="cables"></div>
+        <div class="row">
+          <button id="btn-autotension">Выбрать слабину</button>
+          <button id="btn-handguide" class="toggle">Вести за руку</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabpage" id="tab-gcode">
+      <textarea id="gcode-text" spellcheck="false" placeholder="G21 G90&#10;F3000&#10;G1 X2500 Y2000 Z1000&#10;G1 X3500&#10;G1 Y3000&#10;G1 X2500&#10;G1 Y2000"></textarea>
+      <div class="row">
+        <input type="file" id="gcode-file" accept=".gcode,.nc,.txt">
+        <button id="gcode-check">Проверить</button>
+        <button id="gcode-run" disabled>Пуск</button>
+        <button id="gcode-pause" disabled>Пауза</button>
+        <button id="gcode-stop" disabled>Стоп</button>
+      </div>
+      <div class="row">
+        <label class="grow">подача <input id="gcode-override" type="range" min="10" max="200" value="100">
+          <span id="gcode-override-value">100 %</span></label>
+      </div>
+      <div class="progress"><div id="gcode-bar"></div></div>
+      <pre id="gcode-report" class="report"></pre>
+    </div>
+
+    <div class="tabpage" id="tab-calib">
+      <p class="hint">Платформа опускается до касания опоры; касание видно по
+        одновременному падению натяжения на всех тросах. Координаты репера
+        задаются вручную — их точность и определяет точность системы.</p>
+      <div class="mdi">
+        <label>X <input id="probe-x" type="number" step="1"></label>
+        <label>Y <input id="probe-y" type="number" step="1"></label>
+        <label>Z <input id="probe-z" type="number" step="1" value="60"></label>
+        <button id="probe-go">Опустить до касания</button>
+        <button id="probe-accept">Записать точку</button>
+      </div>
+      <div class="row">
+        <button id="calib-solve">Рассчитать</button>
+        <button id="calib-apply">Рассчитать и сохранить</button>
+        <button id="calib-clear" class="ghost">Очистить точки</button>
+      </div>
+      <pre id="calib-report" class="report"></pre>
+    </div>
+
+    <div class="tabpage" id="tab-settings">
+      <div class="row"><button id="settings-reload">Обновить</button>
+        <span class="hint">правки сохраняются в machine.yaml, комментарии в файле остаются</span></div>
+      <div id="settings-body"></div>
+    </div>
+
+    <div class="tabpage" id="tab-log">
+      <pre id="log" class="report"></pre>
+    </div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

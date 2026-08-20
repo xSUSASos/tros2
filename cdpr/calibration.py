@@ -1,22 +1,45 @@
-"""Калибровка: определение параметров лебёдок по точкам посадки.
+"""Привязка: перевод отсчётов энкодера в длину троса.
 
-Что калибруется и почему именно это.
+Нужно узнать всего два числа на лебёдку — отсчёт энкодера в известной точке и
+длину троса в этот момент. Приращение длины дальше известно точно и безо
+всякой калибровки: сколько импульсов намотал барабан, столько троса и выбрал.
+Неизвестно только начало отсчёта, и вся привязка состоит в том, чтобы его
+получить.
 
-Координаты якорей ЗАМЕРЯЮТСЯ дальномером, а не вычисляются. Проверка на
-модели показала, что попытка вывести все двенадцать координат из одних лишь
-длин тросов плохо обусловлена: при шуме измерения в 1 мм ошибка положения
-выходит 40-70 мм. Если же якоря замерены с точностью 5 мм, ошибка
-позиционирования получается около 10 мм. Вывод простой: калибровка не может
-быть точнее рулетки, и незачем делать вид, что может.
+Известная точка — угол. Коробка подтягивается вплотную к модулю и упирается;
+повторяемость тут механическая, а не программная, и потому надёжная. Одного
+угла достаточно, и одним углом стоит и ограничиться.
 
-Зато калибровкой прекрасно определяется то, что руками не измерить:
-сколько троса намотано на барабане (а значит, как отсчёт энкодера связан с
-длиной) и жёсткость троса на растяжение.
+Про лишние углы стоит сказать прямо, потому что соблазн ими проверить себя
+велик. У угла натянут ровно ОДИН трос — тот, что тянет; остальные три
+следящих держатся у нижнего края, около двух ньютонов, и провисают. А
+провисший трос о геометрии не говорит ничего: его отсчёт показывает, сколько
+стравлено с барабана, а не расстояние до платформы. Поэтому проверка по
+второму и третьему углу опирается на один-два числа и слаба. Настоящие
+проверки другие и делаются на верстаке: проворот барабана рукой ловит ошибку
+масштаба, рулетка — ошибку в размерах рамы.
 
-Точка посадки — место с известными координатами, куда платформа приводится
-и где записываются отсчёты всех энкодеров. На подвесе это посадка на пол в
-размеченную точку: касание видно по одновременному падению натяжения на всех
-тросах, и сигнал этот куда чётче, чем скачок момента при боковом упоре.
+Чего здесь СОЗНАТЕЛЬНО нет.
+
+*Восстановления геометрии рамы.* Соблазн вывести стороны прямоугольника из
+разности отсчётов между углами велик, но чувствительность к тому, насколько
+коробка не доходит до модуля, выходит примерно двукратной: знание этой
+величины с точностью 20 мм даёт сторону с точностью 36 мм. Рулетка точнее.
+Поэтому стороны вводятся руками, а лишние углы работают ПРОВЕРКОЙ: по
+привязке из первого угла предсказываются отсчёты в остальных, и расхождение
+сразу показывает, врут ли размеры рамы или масштаб «мм на импульс».
+
+*Подгонки координат модулей по позам.* Проверено численно и отброшено: модули
+почти в одной плоскости, и смещения тросов размениваются на положение модулей.
+Решатель уходит от истины на сотни миллиметров, получая при этом МЕНЬШУЮ
+невязку. Координаты якорей замеряются, а не вычисляются.
+
+*Подгонки жёсткости троса.* Тот же капкан. В углу натяжение ведущего троса
+на порядок больше, чем у остальных, поэтому вытяжка становится очень сильной
+ручкой: решатель охотно объясняет ею любую ошибку в том, где именно встала
+коробка, и уезжает к границе допустимого. Жёсткость меряется прямо и за две
+минуты: подвесить на отрезок лески известной длины известный груз и замерить
+удлинение. EA = груз * длина / удлинение.
 """
 from __future__ import annotations
 
@@ -24,9 +47,8 @@ import logging
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.optimize import least_squares
 
-from cdpr.config import MachineConfig, WinchCfg
+from cdpr.config import MachineConfig
 from cdpr.kinematics import CDPRKinematics
 from cdpr.line import LineModel
 
@@ -34,16 +56,15 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
-class CalibrationPoint:
-    """Замер в точке с известными координатами."""
+class CornerRecord:
+    """Отсчёты энкодеров в момент, когда коробка упёрлась в модуль."""
 
-    position_mm: np.ndarray
+    corner: int
     counts: np.ndarray
     tensions_n: np.ndarray | None = None
     label: str = ""
 
     def __post_init__(self) -> None:
-        self.position_mm = np.asarray(self.position_mm, dtype=float)
         self.counts = np.asarray(self.counts, dtype=float)
         if self.tensions_n is not None:
             self.tensions_n = np.asarray(self.tensions_n, dtype=float)
@@ -51,417 +72,197 @@ class CalibrationPoint:
 
 @dataclass
 class CalibrationResult:
-    count_empty: list[int]
-    length_at_empty_mm: list[float]
+    count_ref: list[int]
+    length_at_ref_mm: list[float]
     ea_n: list[float] | None
     residual_rms_mm: float
     residual_max_mm: float
-    conditioning: float
     warnings: list[str] = field(default_factory=list)
     points_used: int = 0
+    checked: int = 0
 
     @property
     def ok(self) -> bool:
-        return self.residual_rms_mm < 10.0 and not any("не сошлось" in w for w in self.warnings)
+        return not any(w.startswith("!") for w in self.warnings)
 
     def as_updates(self) -> dict[int, dict[str, float]]:
         """В формате, который принимает save_calibration."""
         updates: dict[int, dict[str, float]] = {}
-        for i, (empty, length) in enumerate(zip(self.count_empty, self.length_at_empty_mm, strict=True)):
-            entry = {"count_empty": int(empty), "length_at_empty_mm": round(float(length), 3)}
+        for i, (ref, length) in enumerate(zip(self.count_ref, self.length_at_ref_mm, strict=True)):
+            entry: dict[str, float] = {
+                "count_ref": int(ref),
+                "length_at_ref_mm": round(float(length), 3),
+            }
             if self.ea_n is not None:
                 entry["ea_n"] = round(float(self.ea_n[i]), 1)
             updates[i] = entry
         return updates
 
     def summary(self) -> str:
-        lines = [
-            f"Калибровка по {self.points_used} точкам:",
-            f"  расхождение: среднеквадратичное {self.residual_rms_mm:.2f} мм, "
-            f"наибольшее {self.residual_max_mm:.2f} мм",
-            f"  обусловленность задачи: {self.conditioning:.1f}",
-        ]
-        for i, length in enumerate(self.length_at_empty_mm):
-            ea = f", EA {self.ea_n[i]:.0f} Н" if self.ea_n else ""
-            lines.append(f"  лебёдка {i}: троса при пустом барабане {length / 1000:.3f} м{ea}")
-        lines += ["  " + w for w in self.warnings]
+        lines = [f"Привязка по углу, проверок {self.checked}:"]
+        for i, length in enumerate(self.length_at_ref_mm):
+            ea = f", жёсткость троса {self.ea_n[i]:.0f} Н" if self.ea_n else ""
+            lines.append(f"  трос {i}: в опорной точке {length:.1f} мм{ea}")
+        if self.checked and self.residual_rms_mm:
+            lines.append(
+                f"  расхождение на проверочных углах (по натянутым тросам): "
+                f"среднеквадратичное {self.residual_rms_mm:.1f} мм, "
+                f"наибольшее {self.residual_max_mm:.1f} мм"
+            )
+        lines += ["  " + w.lstrip("!") for w in self.warnings]
         return "\n".join(lines)
 
 
-def _predicted_counts(
-    winch: WinchCfg, line: LineModel, distance_mm: float, tension_n: float,
-    count_empty: float, length_at_empty: float, ea_n: float | None,
-) -> float:
-    """Какой отсчёт энкодера должен быть, если трос дотянут до этой точки."""
-    free = distance_mm / (1.0 + tension_n / ea_n) if ea_n else distance_mm
-    wound = max(0.0, length_at_empty - free)
-    turns = line.turns_for_wound(wound)
-    return count_empty + winch.direction * turns * winch.counts_per_drum_rev
+# --------------------------------------------------------------------------- #
+#  Где стоит коробка, упершись в модуль
+# --------------------------------------------------------------------------- #
+def park_pose(machine: MachineConfig, corner: int,
+              kinematics: CDPRKinematics | None = None) -> np.ndarray:
+    """Положение центра коробки, когда она подтянута к модулю `corner`.
+
+    Коробка приходит к модулю по диагонали, со стороны центра рамы, поэтому
+    смещение откладывается вдоль этого направления. Обе величины —
+    горизонтальный отступ и высота — меряются линейкой один раз.
+
+    Ошибка в них сдвигает всю систему координат целиком, но движение не
+    искажает: она входит во все длины одинаково.
+    """
+    kin = kinematics or CDPRKinematics.from_config(machine)
+    anchors = kin.anchors
+    if not 0 <= corner < len(anchors):
+        raise ValueError(f"нет угла {corner}, якорей {len(anchors)}")
+
+    centre = anchors[:, :2].mean(axis=0)
+    inward = centre - anchors[corner, :2]
+    norm = float(np.linalg.norm(inward))
+    if norm < 1e-6:
+        raise ValueError(f"якорь {corner} совпал с центром рамы — направление не определить")
+
+    xy = anchors[corner, :2] + inward / norm * machine.homing.corner_inset_mm
+    z = machine.homing.corner_z_mm
+    if z is None:
+        z = machine.geometry.plane_z_mm
+    if z is None:
+        z = float(anchors[:, 2].mean())
+    return np.array([xy[0], xy[1], float(z)])
 
 
-def identify(
+# --------------------------------------------------------------------------- #
+#  Собственно привязка
+# --------------------------------------------------------------------------- #
+def solve_from_corners(
     machine: MachineConfig,
-    points: list[CalibrationPoint],
+    records: list[CornerRecord],
     *,
-    fit_elasticity: bool = True,
+    ea_n: float | None = None,
     kinematics: CDPRKinematics | None = None,
 ) -> CalibrationResult:
-    """Определяет параметры лебёдок по замерам в известных точках.
+    """Привязка по первому углу; остальные углы — проверка.
 
-    Невязка считается в МИЛЛИМЕТРАХ троса, а не в импульсах: так число сразу
-    понятно человеку и сравнимо с точностью разметки точек посадки.
+    Вытяжка троса не игнорируется: геометрия «видит» растянутый трос, а
+    энкодер меряет свободную длину, и разница при капроне доходит до сотни
+    миллиметров. Жёсткость берётся из конфига (`winch.ea_n`) и здесь не
+    подбирается — см. пояснение в шапке модуля.
     """
-    if len(points) < 2:
-        raise ValueError(
-            f"нужно минимум две точки посадки, передана {len(points)}. "
-            f"Практически стоит взять четыре-шесть, разнесённых по всей площади."
-        )
+    if not records:
+        raise ValueError("нужен хотя бы один угол")
 
     kin = kinematics or CDPRKinematics.from_config(machine)
     winches = machine.ordered_winches()
     lines = [LineModel(w) for w in winches]
-    n_winches = len(winches)
+    n = len(winches)
     warnings: list[str] = []
 
-    distances = np.array([kin.inverse(p.position_mm) for p in points])   # (точки, тросы)
-    counts = np.array([p.counts for p in points])
-    if any(p.tensions_n is None for p in points):
-        tensions = np.full_like(distances, machine.tension.target_n)
-        if fit_elasticity:
-            warnings.append(
-                "натяжения в точках не записаны — жёсткость троса определить нельзя, "
-                "вытяжка учтена приближённо по целевому преднатягу"
-            )
-            fit_elasticity = False
-    else:
-        tensions = np.array([p.tensions_n for p in points])
+    for record in records:
+        if record.counts.shape != (n,):
+            raise ValueError(f"нужно {n} отсчётов, в записи {record.counts.shape}")
 
-    # начальные приближения: барабан пуст при нулевом отсчёте, троса намотано
-    # столько, сколько нужно для самой дальней точки плюс запас
-    guess_length = float(distances.max()) * 1.3
-    x0 = np.concatenate([
-        np.zeros(n_winches),                       # count_empty, в оборотах барабана
-        np.full(n_winches, guess_length),          # length_at_empty, мм
-    ])
-    if fit_elasticity:
-        x0 = np.concatenate([x0, np.full(n_winches, 5000.0)])
-
-    scale = np.array([w.counts_per_drum_rev for w in winches])
-
-    def unpack(x: np.ndarray):
-        empty = x[:n_winches] * scale
-        length = x[n_winches:2 * n_winches]
-        ea = x[2 * n_winches:3 * n_winches] if fit_elasticity else [None] * n_winches
-        return empty, length, ea
-
-    def residual(x: np.ndarray) -> np.ndarray:
-        empty, length, ea = unpack(x)
-        out = np.zeros(len(points) * n_winches)
-        k = 0
-        for j, point in enumerate(points):
-            for i in range(n_winches):
-                predicted = _predicted_counts(
-                    winches[i], lines[i], float(distances[j, i]), float(tensions[j, i]),
-                    float(empty[i]), float(length[i]), None if ea[i] is None else float(ea[i]),
-                )
-                # Переводим невязку в миллиметры троса — так она читаема и
-                # сравнима с точностью разметки точек посадки. Масштаб берём
-                # номинальный, по первому слою: он нужен лишь как весовой
-                # коэффициент, и его нескольких процентов погрешности хватает.
-                out[k] = (predicted - counts[j, i]) * winches[i].nominal_mm_per_count
-                k += 1
-        return out
-
-    bounds_low = np.concatenate([np.full(n_winches, -1e6), np.full(n_winches, 1.0)])
-    bounds_high = np.concatenate([np.full(n_winches, 1e6), np.full(n_winches, 1e6)])
-    if fit_elasticity:
-        bounds_low = np.concatenate([bounds_low, np.full(n_winches, 200.0)])
-        bounds_high = np.concatenate([bounds_high, np.full(n_winches, 1e6)])
-
-    solution = least_squares(residual, x0, bounds=(bounds_low, bounds_high), max_nfev=20000)
-    if not solution.success:
-        warnings.append(f"решение не сошлось: {solution.message}")
-
-    empty, length, ea = unpack(solution.x)
-    residuals = solution.fun
-    rms = float(np.sqrt(np.mean(residuals ** 2)))
-    worst = float(np.max(np.abs(residuals)))
-
-    singular = np.linalg.svd(solution.jac, compute_uv=False)
-    conditioning = float(singular[0] / singular[-1]) if singular[-1] > 0 else float("inf")
-    if conditioning > 1e6:
+    have_tension = all(r.tensions_n is not None for r in records)
+    ea_value: float | None = ea_n if ea_n is not None else winches[0].ea_n
+    if ea_value and not have_tension:
         warnings.append(
-            "задача вырождена: по этим точкам параметры разделить нельзя. "
-            "Обычно так бывает, когда барабан не выходит за первый слой — "
-            "тогда результат верен в рабочем диапазоне, но за его пределами не годится"
+            "натяжения в углах не записаны — вытяжка не учтена. При мягком тросе это "
+            "десятки миллиметров ошибки"
         )
-    if rms > 5.0:
+        ea_value = None
+    if not ea_value:
         warnings.append(
-            f"расхождение {rms:.1f} мм великовато. Проверьте разметку точек посадки, "
-            f"не проскальзывает ли трос на барабане и верны ли координаты якорей"
+            "жёсткость троса не задана (winch.ea_n) — вытяжка не учитывается. Померьте её "
+            "грузом: подвесьте известный вес на отрезок лески известной длины и замерьте "
+            "удлинение, EA = вес * длина / удлинение"
+        )
+
+    poses = [park_pose(machine, r.corner, kin) for r in records]
+    geometric = [kin.inverse(p) for p in poses]
+
+    def calibrate(ea: float | None) -> tuple[np.ndarray, np.ndarray]:
+        """Опорные числа по первой записи при данной жёсткости троса."""
+        reference, g = records[0], geometric[0]
+        tension = reference.tensions_n if reference.tensions_n is not None else np.zeros(n)
+        free = np.array([
+            float(g[i]) / (1.0 + float(tension[i]) / ea) if ea else float(g[i])
+            for i in range(n)
+        ])
+        return reference.counts.astype(float), free
+
+    # Провисший трос в проверке не участвует: его отсчёт говорит, сколько
+    # стравлено с барабана, а вовсе не расстояние до коробки. Считать по нему
+    # расхождение — значит мерить величину слабины и называть её ошибкой
+    # геометрии.
+    taut_floor = machine.tension.min_n
+    usable = [0]
+
+    def check_residual(ea: float | None) -> np.ndarray:
+        """Расхождение на проверочных углах, в миллиметрах троса."""
+        count_ref, length_ref = calibrate(ea)
+        out: list[float] = []
+        usable[0] = 0
+        for record, g in zip(records[1:], geometric[1:], strict=True):
+            tension = record.tensions_n if record.tensions_n is not None else np.zeros(n)
+            for i in range(n):
+                if float(tension[i]) < taut_floor:
+                    continue
+                usable[0] += 1
+                free_expected = (
+                    float(g[i]) / (1.0 + float(tension[i]) / ea) if ea else float(g[i])
+                )
+                wound = length_ref[i] - free_expected
+                turns = lines[i].turns_for_wound(wound)
+                predicted = count_ref[i] + winches[i].direction * turns * winches[i].counts_per_drum_rev
+                out.append((predicted - record.counts[i]) * winches[i].nominal_mm_per_count)
+        return np.array(out) if out else np.zeros(0)
+
+    count_ref, length_ref = calibrate(ea_value)
+    residuals = check_residual(ea_value)
+    rms = float(np.sqrt(np.mean(residuals ** 2))) if residuals.size else 0.0
+    worst = float(np.max(np.abs(residuals))) if residuals.size else 0.0
+    if residuals.size and usable[0] < 2:
+        warnings.append(
+            f"проверка по лишним углам не набрала данных: натянутых тросов оказалось "
+            f"{usable[0]}. Так и должно быть — у угла тянет один трос, остальные провисают. "
+            f"Опирайтесь на проворот барабана и рулетку, а не на это число"
+        )
+
+    if residuals.size and rms > 60.0:
+        warnings.append(
+            f"!расхождение {rms:.0f} мм между углами — это много. Проверьте по порядку: "
+            f"совпадает ли encoder_counts_per_rev с проворотом барабана рукой, верны ли "
+            f"стороны рамы в geometry.anchors, и не проскальзывает ли трос"
+        )
+    elif residuals.size and rms > 15.0:
+        warnings.append(
+            f"расхождение {rms:.0f} мм между углами. Чаще всего это значит, что коробка "
+            f"встаёт не там, где считает homing.corner_inset_mm — померьте линейкой, "
+            f"где она на самом деле останавливается"
         )
 
     return CalibrationResult(
-        count_empty=[int(round(v)) for v in empty],
-        length_at_empty_mm=[float(v) for v in length],
-        ea_n=[float(v) for v in ea] if fit_elasticity else None,
-        residual_rms_mm=rms, residual_max_mm=worst, conditioning=conditioning,
-        warnings=warnings, points_used=len(points),
-    )
-
-
-# --------------------------------------------------------------------------- #
-#  Калибровка по посадкам в произвольных местах пола
-# --------------------------------------------------------------------------- #
-@dataclass
-class Landing:
-    """Посадка на пол там, где получилось.
-
-    Координаты X и Y неизвестны и определяются вместе со всем остальным —
-    размечать пол не нужно. Известна только высота: платформа стоит на полу,
-    значит её центр находится на высоте `landing_height_mm` над ним.
-    """
-
-    counts: np.ndarray
-    tensions_n: np.ndarray | None = None
-    label: str = ""
-
-    def __post_init__(self) -> None:
-        self.counts = np.asarray(self.counts, dtype=float)
-        if self.tensions_n is not None:
-            self.tensions_n = np.asarray(self.tensions_n, dtype=float)
-
-
-def identify_from_landings(
-    machine: MachineConfig,
-    landings: list[Landing],
-    *,
-    floor_z_mm: float | None = None,
-    fit_elasticity: bool = True,
-    kinematics: CDPRKinematics | None = None,
-) -> CalibrationResult:
-    """Определяет смещения тросов по посадкам, не размечая пол.
-
-    Работает только когда координаты модулей уже известны — их даёт либо
-    прямой замер, либо восстановление по взаимным расстояниям и высотам
-    (cdpr/geometry_fit.py). Собственно по посадкам ищутся: сколько троса
-    намотано на каждом барабане, и, если записаны натяжения, жёсткость троса.
-    """
-    if len(landings) < 3:
-        raise ValueError(
-            f"нужно минимум три посадки, передано {len(landings)}. "
-            f"Практически берите четыре-пять, разнесённых по достижимой части пола"
-        )
-
-    kin = kinematics or CDPRKinematics.from_config(machine)
-    winches = machine.ordered_winches()
-    lines = [LineModel(w) for w in winches]
-    n_winches = len(winches)
-    n_land = len(landings)
-    warnings: list[str] = []
-
-    floor_z = floor_z_mm if floor_z_mm is not None else machine.platform.landing_height_mm
-    counts = np.array([land.counts for land in landings])
-
-    if any(land.tensions_n is None for land in landings):
-        tensions = np.full_like(counts, machine.tension.target_n)
-        if fit_elasticity:
-            warnings.append(
-                "натяжения при посадке не записаны — жёсткость троса определить нельзя"
-            )
-            fit_elasticity = False
-    else:
-        tensions = np.array([land.tensions_n for land in landings])
-
-    centre = kin.anchors.mean(axis=0)
-    guess_length = float(np.max(np.linalg.norm(kin.anchors - centre, axis=1))) * 1.6
-    scale = np.array([w.counts_per_drum_rev for w in winches])
-
-    x0 = np.concatenate([
-        np.zeros(n_winches),
-        np.full(n_winches, guess_length),
-        np.full(n_winches, 5000.0) if fit_elasticity else np.array([]),
-        np.tile(centre[:2], n_land),
-    ])
-    n_head = 3 * n_winches if fit_elasticity else 2 * n_winches
-
-    def unpack(x: np.ndarray):
-        empty = x[:n_winches] * scale
-        length = x[n_winches:2 * n_winches]
-        ea = x[2 * n_winches:3 * n_winches] if fit_elasticity else [None] * n_winches
-        xy = x[n_head:].reshape(n_land, 2)
-        return empty, length, ea, xy
-
-    def residual(x: np.ndarray) -> np.ndarray:
-        empty, length, ea, xy = unpack(x)
-        poses = np.column_stack([xy, np.full(n_land, floor_z)])
-        distances = np.array([kin.inverse(p) for p in poses])
-        out = np.zeros(n_land * n_winches)
-        k = 0
-        for j in range(n_land):
-            for i in range(n_winches):
-                predicted = _predicted_counts(
-                    winches[i], lines[i], float(distances[j, i]), float(tensions[j, i]),
-                    float(empty[i]), float(length[i]), None if ea[i] is None else float(ea[i]),
-                )
-                out[k] = (predicted - counts[j, i]) * winches[i].nominal_mm_per_count
-                k += 1
-        return out
-
-    low = np.concatenate([np.full(n_winches, -1e6), np.full(n_winches, 1.0),
-                          np.full(n_winches, 200.0) if fit_elasticity else np.array([]),
-                          np.full(2 * n_land, -1e5)])
-    high = np.concatenate([np.full(n_winches, 1e6), np.full(n_winches, 1e6),
-                           np.full(n_winches, 1e6) if fit_elasticity else np.array([]),
-                           np.full(2 * n_land, 1e5)])
-    solution = least_squares(residual, x0, bounds=(low, high), max_nfev=100000)
-    if not solution.success:
-        warnings.append(f"решение не сошлось: {solution.message}")
-
-    empty, length, ea, xy = unpack(solution.x)
-    residuals = solution.fun
-    rms = float(np.sqrt(np.mean(residuals ** 2)))
-    singular = np.linalg.svd(solution.jac, compute_uv=False)
-    conditioning = float(singular[0] / singular[-1]) if singular[-1] > 0 else float("inf")
-
-    spread = float(np.max(np.linalg.norm(xy - xy.mean(axis=0), axis=1)))
-    if spread < 300.0:
-        warnings.append(
-            f"посадки разошлись всего на {spread:.0f} мм — этого мало. "
-            f"Разнесите их по достижимой части пола, иначе смещения тросов "
-            f"определяются неуверенно"
-        )
-    if rms > 5.0:
-        warnings.append(
-            f"расхождение {rms:.1f} мм великовато. Проверьте координаты модулей, "
-            f"высоту платформы при посадке и не проскальзывает ли трос"
-        )
-
-    return CalibrationResult(
-        count_empty=[int(round(v)) for v in empty],
-        length_at_empty_mm=[float(v) for v in length],
-        ea_n=[float(v) for v in ea] if fit_elasticity else None,
-        residual_rms_mm=rms, residual_max_mm=float(np.max(np.abs(residuals))),
-        conditioning=conditioning, warnings=warnings, points_used=n_land,
-    )
-
-
-# --------------------------------------------------------------------------- #
-#  Привязка по замерам дальномером до платформы
-# --------------------------------------------------------------------------- #
-@dataclass
-class RangeStation:
-    """Стоянка: платформа стоит на месте, из каждого модуля до неё стреляют дальномером.
-
-    Это самый прямой способ узнать длину троса: измеряется ровно та величина,
-    которая нужна, без промежуточных предположений. Поэтому ошибка не
-    накапливается — она примерно равна ошибке самого дальномера.
-    """
-
-    distances_mm: np.ndarray     # расстояние от каждого модуля до платформы
-    counts: np.ndarray
-    tensions_n: np.ndarray | None = None
-    label: str = ""
-
-    def __post_init__(self) -> None:
-        self.distances_mm = np.asarray(self.distances_mm, dtype=float)
-        self.counts = np.asarray(self.counts, dtype=float)
-        if self.tensions_n is not None:
-            self.tensions_n = np.asarray(self.tensions_n, dtype=float)
-
-
-def identify_from_ranges(
-    machine: MachineConfig,
-    stations: list[RangeStation],
-    *,
-    fit_elasticity: bool = True,
-) -> CalibrationResult:
-    """Калибрует лебёдки по прямым замерам длины тросов.
-
-    Стоянки нужно брать на РАЗНОЙ ВЫСОТЕ. Жёсткость троса видна только там,
-    где натяжение меняется: если все стоянки на одном уровне, натяжение
-    везде одинаковое, и отличить вытяжку от смещения нечем. Без учёта
-    вытяжки ошибка положения вырастает с единиц миллиметров до десятков.
-    """
-    if len(stations) < 2:
-        raise ValueError(
-            f"нужно минимум две стоянки, передана {len(stations)}. "
-            f"Берите три, на разной высоте — иначе жёсткость троса не определить"
-        )
-
-    winches = machine.ordered_winches()
-    lines = [LineModel(w) for w in winches]
-    n_winches = len(winches)
-    warnings: list[str] = []
-
-    measured = np.array([s.distances_mm for s in stations])
-    counts = np.array([s.counts for s in stations])
-    if any(s.tensions_n is None for s in stations):
-        tensions = np.full_like(measured, machine.tension.target_n)
-        if fit_elasticity:
-            warnings.append("натяжения на стоянках не записаны — жёсткость троса не ищем")
-            fit_elasticity = False
-    else:
-        tensions = np.array([s.tensions_n for s in stations])
-
-    spread = float(tensions.max() - tensions.min())
-    if fit_elasticity and spread < 5.0:
-        warnings.append(
-            f"натяжение на всех стоянках почти одинаковое (разброс {spread:.1f} Н) — "
-            f"жёсткость троса по таким данным не определяется. Разнесите стоянки по высоте"
-        )
-
-    scale = np.array([w.counts_per_drum_rev for w in winches])
-    x0 = np.concatenate([
-        np.zeros(n_winches),
-        np.full(n_winches, float(measured.max()) * 1.4),
-        np.full(n_winches, 5000.0) if fit_elasticity else np.array([]),
-    ])
-
-    def unpack(x: np.ndarray):
-        empty = x[:n_winches] * scale
-        length = x[n_winches:2 * n_winches]
-        ea = x[2 * n_winches:3 * n_winches] if fit_elasticity else [None] * n_winches
-        return empty, length, ea
-
-    def residual(x: np.ndarray) -> np.ndarray:
-        empty, length, ea = unpack(x)
-        out = np.zeros(len(stations) * n_winches)
-        k = 0
-        for j in range(len(stations)):
-            for i in range(n_winches):
-                predicted = _predicted_counts(
-                    winches[i], lines[i], float(measured[j, i]), float(tensions[j, i]),
-                    float(empty[i]), float(length[i]), None if ea[i] is None else float(ea[i]),
-                )
-                out[k] = (predicted - counts[j, i]) * winches[i].nominal_mm_per_count
-                k += 1
-        return out
-
-    low = np.concatenate([np.full(n_winches, -1e6), np.full(n_winches, 1.0),
-                          np.full(n_winches, 500.0) if fit_elasticity else np.array([])])
-    high = np.concatenate([np.full(n_winches, 1e6), np.full(n_winches, 1e6),
-                           np.full(n_winches, 2e4) if fit_elasticity else np.array([])])
-    solution = least_squares(residual, x0, bounds=(low, high), max_nfev=100000)
-    if not solution.success:
-        warnings.append(f"решение не сошлось: {solution.message}")
-
-    empty, length, ea = unpack(solution.x)
-    residuals = solution.fun
-    rms = float(np.sqrt(np.mean(residuals ** 2)))
-    singular = np.linalg.svd(solution.jac, compute_uv=False)
-    conditioning = float(singular[0] / singular[-1]) if singular[-1] > 0 else float("inf")
-
-    if rms > 5.0:
-        warnings.append(
-            f"расхождение {rms:.1f} мм великовато. Проверьте, бил ли дальномер именно "
-            f"в точку схода троса и в одну и ту же точку платформы"
-        )
-
-    return CalibrationResult(
-        count_empty=[int(round(v)) for v in empty],
-        length_at_empty_mm=[float(v) for v in length],
-        ea_n=[float(v) for v in ea] if fit_elasticity else None,
-        residual_rms_mm=rms, residual_max_mm=float(np.max(np.abs(residuals))),
-        conditioning=conditioning, warnings=warnings, points_used=len(stations),
+        count_ref=[int(round(v)) for v in count_ref],
+        length_at_ref_mm=[float(v) for v in length_ref],
+        ea_n=None,   # жёсткость здесь не подбирается и перезаписывать её нельзя
+        residual_rms_mm=rms,
+        residual_max_mm=worst,
+        warnings=warnings,
+        points_used=1,
+        checked=max(0, len(records) - 1),
     )

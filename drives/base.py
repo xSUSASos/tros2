@@ -185,7 +185,8 @@ class DriveState:
     speed_rpm: float = 0.0
     torque_percent: float = 0.0
     alarm: int = 0
-    enabled: bool = False
+    enabled: bool = False   # привод отвечает и не в аварии; servo-on у T3D
+                            # задан параметром P-098 и снимается только питанием
     stamp: float = field(default_factory=time.perf_counter)
     error: str | None = None
 
@@ -278,9 +279,6 @@ class DriveGroup(ABC):
     @abstractmethod
     def initialize(self) -> None:
         """Приводит параметры привода к рабочему режиму (init_sequence профиля)."""
-
-    @abstractmethod
-    def enable(self, on: bool) -> None: ...
 
     @abstractmethod
     def read_states(self) -> list[DriveState]:

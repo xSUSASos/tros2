@@ -1,35 +1,41 @@
 # =============================================================================
 #  Профиль привода HLTNC T3D (модель HL-T3D-L20A-RABF)
 #
-#  Это ШАБЛОН. Номера параметров P-xxx взяты из мануала и подтверждены,
-#  но СООТВЕТСТВИЕ P-xxx АДРЕСАМ MODBUS в мануале отсутствует (полный каталог
-#  поставлялся на CD). Поля address / *_base = null означают "ещё не известно".
+#  Карта регистров подтверждена мануалом "Modbus Communication function
+#  Description V3.3" (раздел 4 — FC03 addr = P-xxx decimal; раздел про FC04 —
+#  таблица статусных регистров 0x0000..0x002D). Адреса ниже больше не гипотеза
+#  reg_probe, а прямое соответствие мануалу.
 #
-#  Заполняется утилитой:  python tools/reg_probe.py
-#  Пока addressing.param_base == null, драйвер работает только с симулятором
-#  и осознанно падает с понятным сообщением при попытке выйти на железо.
+#  Пределы момента (P-069/P-070), принудительный servo-on (P-098), функции
+#  входов DI (P-100..103) и максимальная скорость (P-075) взяты из того же
+#  мануала и проверены на живом железе предыдущей версией системы.
+#
+#  reg_probe остаётся полезен для величин, которых нет в таблице FC04
+#  (encoder_bits_now, control_mode_now, alarm_history).
 # =============================================================================
 name: "HLTNC T3D"
 vendor: "HLTNC"
 protocol: modbus_rtu
 
 addressing:
-  # Гипотеза, которую проверяет reg_probe: адрес = param_base + номер параметра.
-  # Т.е. P-137 -> param_base + 137.
-  param_base: null
+  # Подтверждено V3.3, раздел 4: "mailing address of parameter P-005 is 005
+  # (decimal)" — адрес FC03 равен номеру параметра P-xxx напрямую.
+  param_base: 0
 
   # Многие приводы дублируют параметры вторым диапазоном, запись в который
-  # НЕ ПИШЕТ В EEPROM. Это критично: уставку скорости мы пишем ~50 раз/с,
-  # ресурс EEPROM (~100k циклов) сгорит за полчаса. reg_probe это выясняет.
-  param_ram_base: null
+  # НЕ ПИШЕТ В EEPROM. V3.3 описывает другой механизм: FC06 всегда пишет
+  # только в RAM, в EEPROM попадает лишь после явного FC41 (или FC06 по
+  # адресу 0x1001 = 0x1234). Отдельный RAM-диапазон приводу не нужен.
+  param_ram_base:
 
-  # База для мониторных величин (группа d-xxx). Может совпадать с param_base
-  # со своим смещением, а может быть отдельным диапазоном input registers.
-  monitor_base: null
-  monitor_function: null   # 3 (holding) или 4 (input) — определяется пробой
+  # База для мониторных величин (группа d-xxx) — подтверждено таблицей FC04
+  # V3.3: адрес статусного регистра совпадает с его порядковым номером (dec).
+  monitor_base: 0
+  monitor_function: 4      # FC04 (input registers) — подтверждено V3.3
 
-  # Порядок 16-битных слов внутри 32-битных величин.
-  word_order: lo_hi        # lo_hi | hi_lo — проверяется пробой
+  # Порядок 16-битных слов внутри 32-битных величин: в таблице FC04 младшее
+  # слово (L) всегда идёт по меньшему адресу, старшее (H) — по большему.
+  word_order: lo_hi        # подтверждено V3.3
 
 function_codes:
   read_holding: 3
@@ -39,119 +45,147 @@ function_codes:
 
 limits:
   max_slave_id: 32         # P-181 диапазон -1..32
-  max_regs_per_read: 16    # консервативно; уточняется пробой
+  # V3.3 разрешает читать до восьми регистров за раз. Число прямо определяет
+  # частоту цикла: чем крупнее куски, тем меньше транзакций на оборот опроса.
+  max_regs_per_read: 8
 
 # ---------------------------------------------------------------------------
 #  Параметры P-xxx.  confirmed: true = явно прочитано в мануале.
 #  address: если задан — используется напрямую, иначе param_base + p.
 # ---------------------------------------------------------------------------
 params:
-  motor_model_code:    {p: 2,   type: u16, confirmed: true}
-  control_mode:        {p: 4,   type: u16, confirmed: true,
-                        enum: {position: 0, speed: 1, torque: 2}}
-  speed_loop_kp:       {p: 5,   type: u16, confirmed: true, default: 50}
-  speed_loop_ti:       {p: 6,   type: u16, confirmed: true, default: 20}
-  torque_filter:       {p: 7,   type: u16, confirmed: true, default: 25}
-  speed_detect_filter: {p: 19,  type: u16, confirmed: true, default: 40}
-  speed_source:        {p: 25,  type: u16, confirmed: true,
-                        enum: {analog: 0, internal: 1, analog_plus_internal: 2, pulse: 3}}
-  egear_num_hi:        {p: 28,  type: u16, confirmed: true}
-  egear_num_lo:        {p: 29,  type: u16, confirmed: true}
-  egear_den:           {p: 30,  type: u16, confirmed: true}
-  pulse_input_mode:    {p: 35,  type: u16, confirmed: true,
-                        enum: {pulse_dir: 0, cw_ccw: 1, quadrature: 2}}
-  pulse_input_dir:     {p: 36,  type: u16, confirmed: true, enum: {normal: 0, reverse: 1}}
-  analog_speed_gain:   {p: 46,  type: u16, confirmed: true, unit: "rpm/V", default: 300}
-  analog_zero_offset:  {p: 47,  type: i16, confirmed: true, unit: "0.1mV"}
-  speed_cmd_dir:       {p: 48,  type: u16, confirmed: true, enum: {normal: 0, reverse: 1}}
-  analog_deadband_pos: {p: 51,  type: u16, confirmed: true, unit: mV}
-  analog_deadband_neg: {p: 52,  type: i16, confirmed: true, unit: mV}
-  accel_time:          {p: 60,  type: u16, confirmed: true, unit: "ms/1000rpm", default: 100}
-  decel_time:          {p: 61,  type: u16, confirmed: true, unit: "ms/1000rpm", default: 100}
-  jog_speed:           {p: 76,  type: i16, confirmed: true, unit: rpm, default: 100}
-  motor_series:        {p: 99,  type: u16, confirmed: true}
-  do1_function:        {p: 108, type: i16, confirmed: true}
-  do2_function:        {p: 109, type: i16, confirmed: true, default: 3}
-  do3_function:        {p: 110, type: i16, confirmed: true, default: 5}
-  do4_function:        {p: 111, type: i16, confirmed: true, default: 8}
-  speed_preset_1:      {p: 137, type: i16, confirmed: true, unit: rpm}
-  speed_preset_2:      {p: 138, type: i16, confirmed: true, unit: rpm}
-  speed_preset_3:      {p: 139, type: i16, confirmed: true, unit: rpm}
-  speed_preset_4:      {p: 140, type: i16, confirmed: true, unit: rpm}
-  speed_preset_5:      {p: 141, type: i16, confirmed: true, unit: rpm}
-  speed_preset_6:      {p: 142, type: i16, confirmed: true, unit: rpm}
-  speed_preset_7:      {p: 143, type: i16, confirmed: true, unit: rpm}
-  speed_preset_8:      {p: 144, type: i16, confirmed: true, unit: rpm}
-  brake_delay_speed:   {p: 167, type: u16, confirmed: true}
-  brake_delay_time:    {p: 168, type: u16, confirmed: true}
-  brake_on_delay:      {p: 169, type: u16, confirmed: true}
-  slave_id:            {p: 181, type: i16, confirmed: true}
-  baudrate:            {p: 182, type: u16, confirmed: true,
-                        enum: {4800: 0, 9600: 1, 19200: 2, 38400: 3, 57600: 4, 115200: 5}}
-  serial_format:       {p: 183, type: u16, confirmed: true,
-                        enum: {"8N1": 0, "8E1": 1, "8O1": 2, "8N2": 3, "8E2": 4, "8O2": 5}}
-  encoder_bits:        {p: 184, type: u16, confirmed: true, default: 23}
-  motor_pole_pairs:    {p: 201, type: u16, confirmed: true}
+  motor_model_code: {p: 2, type: u16, confirmed: true}
+  control_mode: {p: 4, type: u16, confirmed: true, enum: {position: 0, speed: 1, torque: 2}}
+  speed_loop_kp: {p: 5, type: u16, confirmed: true, default: 50}
+  speed_loop_ti: {p: 6, type: u16, confirmed: true, default: 20}
+  torque_filter: {p: 7, type: u16, confirmed: true, default: 25}
+  speed_detect_filter: {p: 19, type: u16, confirmed: true, default: 40}
+  speed_source: {p: 25, type: u16, confirmed: true, enum: {analog: 0, internal: 1, analog_plus_internal: 2, pulse: 3}}
+  egear_num_hi: {p: 28, type: u16, confirmed: true}
+  egear_num_lo: {p: 29, type: u16, confirmed: true}
+  egear_den: {p: 30, type: u16, confirmed: true}
+  pulse_input_mode: {p: 35, type: u16, confirmed: true, enum: {pulse_dir: 0, cw_ccw: 1, quadrature: 2}}
+  pulse_input_dir: {p: 36, type: u16, confirmed: true, enum: {normal: 0, reverse: 1}}
+  analog_speed_gain: {p: 46, type: u16, confirmed: true, unit: "rpm/V", default: 300}
+  analog_zero_offset: {p: 47, type: i16, confirmed: true, unit: "0.1mV"}
+  speed_cmd_dir: {p: 48, type: u16, confirmed: true, enum: {normal: 0, reverse: 1}}
+  analog_deadband_pos: {p: 51, type: u16, confirmed: true, unit: mV}
+  analog_deadband_neg: {p: 52, type: i16, confirmed: true, unit: mV}
+  accel_time: {p: 60, type: u16, confirmed: true, unit: "ms/1000rpm", default: 100}
+  decel_time: {p: 61, type: u16, confirmed: true, unit: "ms/1000rpm", default: 100}
+  # Предел момента: единственная защита, работающая независимо от софта.
+  # P-069 действует при вращении в положительную сторону, P-070 — в
+  # отрицательную. Ставить надо ОБА: при direction: -1 привод крутится в
+  # минус, и активен только P-070.
+  torque_limit_fwd: {p: 69, type: i16, confirmed: true, unit: percent, default: 300}
+  torque_limit_rev: {p: 70, type: i16, confirmed: true, unit: percent, default: 300}
+  max_speed: {p: 75, type: u16, confirmed: true, unit: rpm, default: 3000}
+  jog_speed: {p: 76, type: i16, confirmed: true, unit: rpm, default: 100}
+  # 1 = servo-on принудительно, без внешнего входа SON. На этой машине вход
+  # SON никуда не заведён: питание снимает физическая кнопка.
+  servo_on_mode: {p: 98, type: u16, confirmed: true, enum: {external: 0, always_on: 1}}
+  motor_series: {p: 99, type: u16, confirmed: true}
+  do1_function: {p: 108, type: i16, confirmed: true}
+  do2_function: {p: 109, type: i16, confirmed: true, default: 3}
+  do3_function: {p: 110, type: i16, confirmed: true, default: 5}
+  do4_function: {p: 111, type: i16, confirmed: true, default: 8}
+  speed_preset_1: {p: 137, type: i16, confirmed: true, unit: rpm}
+  speed_preset_2: {p: 138, type: i16, confirmed: true, unit: rpm}
+  speed_preset_3: {p: 139, type: i16, confirmed: true, unit: rpm}
+  speed_preset_4: {p: 140, type: i16, confirmed: true, unit: rpm}
+  speed_preset_5: {p: 141, type: i16, confirmed: true, unit: rpm}
+  speed_preset_6: {p: 142, type: i16, confirmed: true, unit: rpm}
+  speed_preset_7: {p: 143, type: i16, confirmed: true, unit: rpm}
+  speed_preset_8: {p: 144, type: i16, confirmed: true, unit: rpm}
+  brake_delay_speed: {p: 167, type: u16, confirmed: true}
+  brake_delay_time: {p: 168, type: u16, confirmed: true}
+  brake_on_delay: {p: 169, type: u16, confirmed: true}
+  slave_id: {p: 181, type: i16, confirmed: true}
+  baudrate: {p: 182, type: u16, confirmed: true, enum: {4800: 0, 9600: 1, 19200: 2, 38400: 3, 57600: 4, 115200: 5}}
+  serial_format: {p: 183, type: u16, confirmed: true, enum: {"8N1": 0, "8E1": 1, "8O1": 2, "8N2": 3, "8E2": 4, "8O2": 5}}
+  encoder_bits: {p: 184, type: u16, confirmed: true, default: 23}
+  motor_pole_pairs: {p: 201, type: u16, confirmed: true}
   motor_rated_current: {p: 204, type: u16, confirmed: true, unit: "0.1A"}
-  motor_rated_speed:   {p: 207, type: u16, confirmed: true, unit: rpm}
-  di1_function:        {p: 100, type: i16, confirmed: false}
-  di2_function:        {p: 101, type: i16, confirmed: false}
-  di3_function:        {p: 102, type: i16, confirmed: false}
-  di4_function:        {p: 103, type: i16, confirmed: false}
-  torque_limit_fwd:    {p: null, type: i16, confirmed: false}
-  torque_limit_rev:    {p: null, type: i16, confirmed: false}
+  motor_rated_speed: {p: 207, type: u16, confirmed: true, unit: rpm}
+  # Функции дискретных входов. 1 = SON, 10 = SP1 (выбор пресета скорости).
+  # В init_sequence не пишутся: как разведены входы на конкретной машине,
+  # софт не знает, а неверная функция входа обездвиживает привод.
+  di1_function: {p: 100, type: i16, confirmed: true}
+  di2_function: {p: 101, type: i16, confirmed: true}
+  di3_function: {p: 102, type: i16, confirmed: true}
+  di4_function: {p: 103, type: i16, confirmed: true}
 
 # ---------------------------------------------------------------------------
 #  Мониторные величины (группа d-xxx на панели привода).
 #  order = позиция в меню привода; помогает при поиске адресов пробой.
 # ---------------------------------------------------------------------------
+#  address ниже — из таблицы FC04 V3.3 (0x0000..0x002D). order оставлен как
+#  было (позиция в меню панели) — он больше не используется для адресации,
+#  раз задан явный address, но полезен при сверке с панелью привода.
 monitors:
-  actual_speed:        {id: "d-SPd", type: i16, unit: rpm,      order: 0}
-  encoder_single_turn: {id: "d-AbS", type: i32, unit: count,    order: 1}
-  position_command:    {id: "d-CPo", type: i32, unit: count,    order: 2}
-  actual_position:     {id: "d-PoS", type: i32, unit: count,    order: 3,  critical: true}
-  position_error:      {id: "d-EPo", type: i32, unit: count,    order: 4}
-  actual_torque:       {id: "d-trq", type: i16, unit: percent,  order: 5,  critical: true}
-  peak_torque:         {id: "d-Pt",  type: i16, unit: percent,  order: 6}
-  actual_current:      {id: "d-i",   type: i16, unit: "0.1A",   order: 7}
-  peak_current:        {id: "d-Pi",  type: i16, unit: "0.1A",   order: 8}
-  pulse_freq:          {id: "d-Frq", type: i16, unit: "0.1kHz", order: 9}
-  speed_command:       {id: "d-CS",  type: i16, unit: rpm,      order: 10}
-  torque_command:      {id: "d-Ct",  type: i16, unit: percent,  order: 11}
-  di_state:            {id: "d-di",  type: u16, unit: bitmask,  order: 12}
-  do_state:            {id: "d-do",  type: u16, unit: bitmask,  order: 13}
-  encoder_bits_now:    {id: "d-Cod", type: u16, unit: bits,     order: 14}
-  encoder_abs_pos:     {id: "d-APo", type: u16, unit: count,    order: 15}
-  avg_load:            {id: "d-Ld",  type: i16, unit: percent,  order: 16}
-  regen_load:          {id: "d-rG",  type: i16, unit: percent,  order: 17}
-  control_mode_now:    {id: "d-Cnt", type: u16,                 order: 18}
-  alarm_code:          {id: "d-Err", type: u16,                 order: 19, critical: true}
-  alarm_history:       {id: "d-rE",  type: u16,                 order: 20}
-  dc_bus_voltage:      {id: "d-U",   type: u16, unit: V,        order: 21}
-  encoder_multiturn:   {id: "d-Abm", type: i32, unit: rev,      order: 22, critical: true}
-  command_position:    {id: "d-CPn", type: i32, unit: count,    order: 23}
+  actual_speed: {id: "d-SPd", type: i16, unit: rpm, address: 0, order: 0}
+  command_position: {id: "d-CPn", type: i32, unit: count, address: 1, order: 23}
+  position_command: {id: "d-CPo", type: i32, unit: count, address: 3, order: 2}
+  # ВАЖНО: позиций в таблице FC04 две, и они разные.
+  #   0x05/0x06 — текущая позиция мотора, счёт от включения питания;
+  #   0x1F/0x20 — абсолютная позиция мотора, многооборотная.
+  # Слежение идёт по абсолютной: энкодер многооборотный, и её показания
+  # переживают снятие питания — а значит привязка не теряется при аварийном
+  # стопе кнопкой. Проверяется проворотом барабана рукой при обесточенном
+  # приводе: за один оборот отсчёт обязан измениться на counts_per_rev.
+  actual_position: {id: "d-APo", type: i32, unit: count, address: 31, order: 22, critical: true}
+  position_from_power_on: {id: "d-PoS", type: i32, unit: count, address: 5, order: 3}
+  position_error: {id: "d-EPo", type: i32, unit: count, address: 7, order: 4}
+  actual_torque: {id: "d-trq", type: i16, unit: percent, address: 9, order: 5, critical: true}
+  peak_torque: {id: "d-Pt", type: i16, unit: percent, address: 10, order: 6}
+  actual_current: {id: "d-i", type: i16, unit: "0.1A", address: 11, order: 7}
+  peak_current: {id: "d-Pi", type: i16, unit: "0.1A", address: 12, order: 8}
+  pulse_freq: {id: "d-Frq", type: i16, unit: "0.1kHz", address: 13, order: 9}
+  speed_command: {id: "d-CS", type: i16, unit: rpm, address: 14, order: 10}
+  torque_command: {id: "d-Ct", type: i16, unit: percent, address: 15, order: 11}
+  di_state: {id: "d-di", type: u16, unit: bitmask, address: 18, order: 12}
+  do_state: {id: "d-do", type: u16, unit: bitmask, address: 19, order: 13}
+  encoder_single_turn: {id: "d-AbS", type: i32, unit: count, address: 20, order: 1}
+  encoder_multiturn: {id: "d-Abm", type: i16, unit: rev, address: 22, order: 22}
+  regen_load: {id: "d-rG", type: i16, unit: percent, address: 23, order: 17}
+  avg_load: {id: "d-Ld", type: i16, unit: percent, address: 24, order: 16}
+  alarm_code: {id: "d-Err", type: u16, address: 26, order: 19, critical: true}
+  dc_bus_voltage: {id: "d-U", type: u16, unit: V, address: 40, order: 21}
+  # Не входят в таблицу FC04 мануала — адрес по-прежнему не подтверждён,
+  # нужна разведка reg_probe.
+  encoder_bits_now: {id: "d-Cod", type: u16, unit: bits, order: 14}
+  encoder_abs_pos: {id: "d-APo", type: u16, unit: count, order: 15}
+  control_mode_now: {id: "d-Cnt", type: u16, order: 18}
+  alarm_history: {id: "d-rE", type: u16, order: 20}
 
 # ---------------------------------------------------------------------------
 #  Инициализация привода под наш способ управления.
 #  Применяется драйвером при старте и по кнопке в панели.
 # ---------------------------------------------------------------------------
 init_sequence:
-  - {param: control_mode,   value: speed}
-  - {param: speed_source,   value: internal}
-  - {param: accel_time,     value: 30}
-  - {param: decel_time,     value: 30}
-  - {param: speed_preset_1, value: 0}
+- {param: speed_preset_1, value: 0, note: "сначала ноль, потом всё остальное"}
+- {param: control_mode, value: speed}
+- {param: speed_source, value: internal}
+- {param: servo_on_mode, value: always_on, note: "вход SON не заведён, разрешаем сами"}
+# Аппаратный разгон сглаживает ступеньки уставки между циклами. 30 мс на
+# 1000 об/мин — при барабане ⌀60 это примерно 1600 мм/с^2 по тросу, заметно
+# резче предела в motion.max_acceleration_mms2, поэтому профиль скорости
+# остаётся за контуром, а привод только сглаживает.
+- {param: accel_time, value: 30}
+- {param: decel_time, value: 30}
 
 # Регистр, который пишется каждый цикл управления (~50 Гц).
 hot_register: speed_preset_1
 
-# Заполняется тестом в reg_probe: безопасно ли писать hot_register часто.
+# Подтверждено V3.3: FC06 пишет только в RAM, в EEPROM попадает лишь после
+# явного FC41 (или FC06 addr=0x1001 val=0x1234) — частая запись hot_register
+# ресурс EEPROM не расходует.
 # null = не проверено, false = пишет в EEPROM (нужно RAM-зеркало), true = безопасно.
-eeprom_safe: null
+eeprom_safe: true
 
 # Коды аварий (раздел 5.1 мануала), расширяется по мере необходимости.
 alarms:
-  4:  "Ошибка слежения за положением"
+  4: "Ошибка слежения за положением"
   12: "Перегрузка при пуске — проверить выбор привода"
   14: "Перегрузка по пиковой мощности при торможении"
   20: "Ошибка ЭСППЗУ (EEPROM)"

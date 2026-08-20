@@ -22,11 +22,12 @@ from fastapi.staticfiles import StaticFiles
 
 from api import schemas
 from cdpr import gcode as gcode_module
-from cdpr.calibration import CalibrationPoint, identify
+from cdpr.calibration import park_pose, solve_from_corners
 from cdpr.config import ConfigError, load_machine, patch_yaml, save_calibration
 from cdpr.modes.admittance import AdmittanceMode
 from cdpr.modes.base import IdleMode
-from cdpr.modes.homing import LandingProbe
+from cdpr.modes.cable import CableMode
+from cdpr.modes.homing import CornerHoming
 from cdpr.modes.manual import JogMode, MdiMode
 from cdpr.modes.program import GcodeMode, check_program_fits
 from cdpr.modes.tensioning import AutoTensionMode
@@ -83,7 +84,7 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     state: dict[str, Any] = {
         "jog": None, "gcode": None, "program": None,
-        "probe_points": [], "last_calibration": None, "workspace_cache": {},
+        "homing": None, "last_calibration": None, "workspace_cache": {},
     }
 
     def controller():
@@ -133,13 +134,19 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     @app.post("/api/enable")
     def enable(request: schemas.EnableRequest) -> dict[str, Any]:
+        """Программное разрешение движения.
+
+        Приводы включены всегда (P-098 = 1), силового разрешения по Modbus у
+        T3D нет. Это предохранитель от случайной команды: пока он снят, на
+        шину уходят нули, что бы ни насчитал режим. Настоящий стоп — кнопка,
+        снимающая питание.
+        """
         try:
-            controller().enable(request.on)
+            controller().allow_motion(request.on)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "enabled": request.on,
-                "note": runtime.drives.enabler.describe(),
-                "automatic": runtime.drives.enabler.is_automatic}
+                "note": "приводы включены всегда; питание снимает физическая кнопка"}
 
     @app.post("/api/mode/idle")
     def go_idle() -> dict[str, Any]:
@@ -148,7 +155,35 @@ def create_app(runtime: Runtime) -> FastAPI:
         return {"ok": True, "mode": "idle"}
 
     # ------------------------------------------------------------------ #
-    #  Ручное управление
+    #  Ручное вращение барабанов — работает без всякой привязки
+    # ------------------------------------------------------------------ #
+    def _ensure_cable() -> CableMode:
+        mode = controller().mode
+        if isinstance(mode, CableMode):
+            return mode
+        cable = CableMode(runtime.drives.n_axes)
+        controller().set_mode(cable)
+        state["cable"] = cable
+        return cable
+
+    @app.post("/api/cable/speed")
+    def cable_speed(request: schemas.CableSpeedRequest) -> dict[str, Any]:
+        cable = _ensure_cable()
+        try:
+            cable.set_speed(request.index, request.speed_mms)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "velocity_mms": cable.velocity_mms.tolist()}
+
+    @app.post("/api/cable/stop")
+    def cable_stop() -> dict[str, Any]:
+        mode = controller().mode
+        if isinstance(mode, CableMode):
+            mode.stop_all()
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ #
+    #  Ручное управление в координатах
     # ------------------------------------------------------------------ #
     def _ensure_jog() -> JogMode:
         mode = controller().mode
@@ -175,7 +210,10 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     @app.post("/api/mdi")
     def mdi(request: schemas.MdiRequest) -> dict[str, Any]:
-        target = np.array([request.x, request.y, request.z], dtype=float)
+        # На плоской машине Z не задаётся: коробка всегда в рабочей плоскости.
+        plane = runtime.machine.geometry.plane_z_mm
+        z = plane if plane is not None else request.z
+        target = np.array([request.x, request.y, z], dtype=float)
         from cdpr.workspace import check_pose
 
         ok, margin, why = check_pose(runtime.machine, controller().kinematics, target)
@@ -325,64 +363,6 @@ def create_app(runtime: Runtime) -> FastAPI:
     # ------------------------------------------------------------------ #
     #  Калибровка
     # ------------------------------------------------------------------ #
-    @app.post("/api/calibration/probe")
-    def calibration_probe(request: schemas.ProbeRequest) -> dict[str, Any]:
-        probe = LandingProbe(label=request.label or f"{request.x:.0f},{request.y:.0f}")
-        state["pending_probe"] = (probe, np.array([request.x, request.y, request.z], float))
-        controller().set_mode(probe)
-        return {"ok": True, "note": "платформа опускается до касания; следите за натяжениями"}
-
-    @app.post("/api/calibration/accept")
-    def calibration_accept() -> dict[str, Any]:
-        pending = state.get("pending_probe")
-        if not pending:
-            raise HTTPException(status_code=409, detail="посадка не выполнялась")
-        probe, position = pending
-        if probe.landed_counts is None:
-            raise HTTPException(status_code=409, detail="касание не зафиксировано")
-        point = CalibrationPoint(position, probe.landed_counts, probe.landed_tensions, probe.label)
-        state["probe_points"].append(point)
-        state["pending_probe"] = None
-        return {"ok": True, "points": len(state["probe_points"])}
-
-    @app.get("/api/calibration/points")
-    def calibration_points() -> dict[str, Any]:
-        return {"points": [
-            {"label": p.label, "position": p.position_mm.tolist(), "counts": p.counts.tolist()}
-            for p in state["probe_points"]
-        ]}
-
-    @app.post("/api/calibration/clear")
-    def calibration_clear() -> dict[str, Any]:
-        state["probe_points"] = []
-        return {"ok": True}
-
-    @app.post("/api/calibration/solve")
-    def calibration_solve(request: schemas.CalibrationSolveRequest) -> dict[str, Any]:
-        points = state["probe_points"]
-        if len(points) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail=f"нужно минимум две точки, снято {len(points)}. "
-                       f"Практически берите четыре-шесть, разнесённых по площади",
-            )
-        result = identify(runtime.machine, points, fit_elasticity=request.fit_elasticity,
-                          kinematics=controller().kinematics)
-        state["last_calibration"] = result
-        payload = {
-            "ok": result.ok,
-            "summary": result.summary(),
-            "residual_rms_mm": round(result.residual_rms_mm, 3),
-            "residual_max_mm": round(result.residual_max_mm, 3),
-            "warnings": result.warnings,
-            "updates": result.as_updates(),
-        }
-        if request.apply and result.ok:
-            save_calibration(result.as_updates(), runtime.machine_path)
-            payload["applied"] = True
-            payload["note"] = "записано в machine.yaml; перезапустите сервер, чтобы применить"
-        return payload
-
     # ------------------------------------------------------------------ #
     #  Настройки
     # ------------------------------------------------------------------ #
@@ -395,8 +375,11 @@ def create_app(runtime: Runtime) -> FastAPI:
                 {"id": a.id, "pos": list(a.pos), "bus": a.bus, "slave": a.slave}
                 for a in machine.geometry.anchors
             ],
-            "platform": {"mass_kg": machine.platform.mass_kg,
-                         "landing_height_mm": machine.platform.landing_height_mm},
+            "platform": {"mass_kg": machine.platform.mass_kg},
+            "geometry": {"plane_z_mm": machine.geometry.plane_z_mm,
+                         "anchor_z_mm": machine.geometry.anchor_z_mm,
+                         "planar": machine.geometry.is_planar},
+            "homing": machine.homing.model_dump(),
             "winches": [
                 {
                     "anchor": w.anchor,
@@ -407,8 +390,8 @@ def create_app(runtime: Runtime) -> FastAPI:
                     "max_rpm": w.max_rpm,
                     "rated_torque_nm": w.rated_torque_nm,
                     "direction": w.direction,
-                    "count_empty": w.count_empty,
-                    "length_at_empty_mm": w.length_at_empty_mm,
+                    "count_ref": w.count_ref,
+                    "length_at_ref_mm": w.length_at_ref_mm,
                     "ea_n": w.ea_n,
                     "calibrated": w.is_calibrated,
                     "turns_per_layer": w.turns_per_layer,
@@ -496,8 +479,10 @@ def _describe(runtime: Runtime) -> dict[str, Any]:
         "anchors": anchors.tolist(),
         "anchor_ids": [a.id for a in machine.geometry.anchors],
         "calibrated": machine.is_calibrated,
-        "enable_backend": runtime.drives.enabler.describe(),
-        "enable_automatic": runtime.drives.enabler.is_automatic,
+        "planar": machine.geometry.is_planar,
+        "plane_z_mm": machine.geometry.plane_z_mm,
+        "torque_limit_percent": machine.safety.drive_torque_limit_percent,
+        "torque_limit_applied": getattr(runtime.drives, "torque_limit_applied", False),
         "tension": machine.tension.model_dump(),
         "workspace": machine.workspace.model_dump(),
         "motion": machine.motion.model_dump(),
@@ -507,114 +492,85 @@ def _describe(runtime: Runtime) -> dict[str, Any]:
 
 
 def register_homing(app: FastAPI, runtime: Runtime, state: dict[str, Any], controller) -> None:
-    """Привязка системы: геометрия модулей и калибровка лебёдок.
+    """Привязка: подтягивание коробки в углы и запись отсчётов.
 
     Отдельным блоком, потому что это самостоятельная процедура со своим
     порядком действий, а не одна кнопка.
     """
-    from cdpr.calibration import identify_from_ranges
-    from cdpr.geometry_fit import PAIRS, fit_modules
-    from cdpr.modes.autohoming import AutoHoming, default_deltas
 
-    @app.post("/api/geometry/fit")
-    def geometry_fit(request: schemas.GeometryFitRequest) -> dict[str, Any]:
-        n = runtime.machine.n_cables
-        if len(request.heights_mm) != n:
-            raise HTTPException(status_code=400,
-                                detail=f"нужно {n} высот модулей, передано {len(request.heights_mm)}")
-        try:
-            fit = fit_modules(request.distances_mm, request.heights_mm, n=n)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        ids = [a.id for a in runtime.machine.geometry.anchors]
-        payload = {
-            "ok": fit.ok,
-            "summary": fit.summary(ids),
-            "residual_rms_mm": round(fit.residual_rms_mm, 2),
-            "warnings": fit.warnings,
-            "positions": [[round(float(v), 1) for v in p] for p in fit.positions],
-            "pairs": [list(p) for p in PAIRS],
-        }
-        if request.apply:
-            if not fit.ok:
-                raise HTTPException(
-                    status_code=400,
-                    detail="замеры не сходятся между собой, записывать такую геометрию нельзя: "
-                           + "; ".join(fit.warnings))
-            updates = {}
-            for i, position in enumerate(fit.positions):
-                updates[f"geometry.anchors.{i}.pos"] = [round(float(v), 1) for v in position]
-            patch_yaml(runtime.machine_path, updates)
-            payload["applied"] = True
-            payload["note"] = ("координаты модулей записаны в machine.yaml; "
-                               "перезапустите сервер, затем пройдите привязку лебёдок")
-        return payload
+    def homing_mode() -> CornerHoming | None:
+        mode = state.get("homing")
+        return mode if isinstance(mode, CornerHoming) else None
 
     @app.post("/api/homing/start")
     def homing_start(request: schemas.HomingStartRequest) -> dict[str, Any]:
-        mode = AutoHoming(default_deltas(request.step_mm), feed_mms=request.feed_mms)
+        machine = runtime.machine
+        corners = request.corners if request.corners is not None else list(machine.homing.corners)
+        for index in corners:
+            if not 0 <= index < machine.n_cables:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"нет угла {index}, модулей {machine.n_cables}")
+        mode = CornerHoming(corners, feed_mms=request.feed_mms)
         state["homing"] = mode
         controller().set_mode(mode)
-        return {"ok": True, "stations": len(mode.plan),
-                "note": "платформа объедет стоянки; на каждой измерьте расстояния дальномером"}
+        return {
+            "ok": True,
+            "corners": corners,
+            "note": ("коробка подтягивается к каждому модулю по очереди; "
+                     "положение для этого не нужно, работа идёт скоростями тросов"),
+        }
 
     @app.get("/api/homing/status")
     def homing_status() -> dict[str, Any]:
-        mode = state.get("homing")
-        if not isinstance(mode, AutoHoming):
-            return {"running": False, "stations": 0}
+        mode = homing_mode()
+        if mode is None:
+            return {"running": False, "recorded": 0}
         return {
             "running": controller().mode is mode,
             "phase": mode.phase,
-            "waiting": mode.waiting,
+            "corner": mode.current_corner,
             "index": mode.index,
-            "total": len(mode.plan),
-            "label": mode.current_label,
-            "stations": len(mode.stations),
+            "total": len(mode.corners or []),
+            "recorded": len(mode.records),
             "progress": round(mode.progress, 3),
         }
 
-    @app.post("/api/homing/confirm")
-    def homing_confirm(request: schemas.HomingConfirmRequest) -> dict[str, Any]:
-        mode = state.get("homing")
-        if not isinstance(mode, AutoHoming):
-            raise HTTPException(status_code=409, detail="привязка не запущена")
-        try:
-            station = mode.confirm(request.distances_mm, controller())
-        except (RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"ok": True, "stations": len(mode.stations), "label": station.label,
-                "tensions_n": None if station.tensions_n is None
-                else [round(float(v), 1) for v in station.tensions_n]}
-
     @app.post("/api/homing/abort")
     def homing_abort() -> dict[str, Any]:
-        mode = state.get("homing")
-        if isinstance(mode, AutoHoming):
+        mode = homing_mode()
+        if mode is not None:
             mode.abort()
         controller().set_mode(IdleMode())
         return {"ok": True}
 
     @app.post("/api/homing/solve")
     def homing_solve(request: schemas.HomingSolveRequest) -> dict[str, Any]:
-        mode = state.get("homing")
-        if not isinstance(mode, AutoHoming) or len(mode.stations) < 2:
+        mode = homing_mode()
+        if mode is None or not mode.records:
             raise HTTPException(
                 status_code=400,
-                detail=f"нужно минимум две стоянки, снято "
-                       f"{0 if not isinstance(mode, AutoHoming) else len(mode.stations)}")
-        result = identify_from_ranges(runtime.machine, mode.stations,
-                                      fit_elasticity=request.fit_elasticity)
+                detail="ни один угол не пройден: сначала запустите хоминг")
+        result = solve_from_corners(
+            runtime.machine, mode.records, kinematics=controller().kinematics,
+        )
+        state["last_calibration"] = result
         payload = {
             "ok": result.ok,
             "summary": result.summary(),
-            "residual_rms_mm": round(result.residual_rms_mm, 3),
+            "residual_rms_mm": round(result.residual_rms_mm, 2),
+            "residual_max_mm": round(result.residual_max_mm, 2),
             "warnings": result.warnings,
             "updates": result.as_updates(),
+            "park_poses": {
+                str(r.corner): [round(float(v), 1)
+                                for v in park_pose(runtime.machine, r.corner,
+                                                   controller().kinematics)]
+                for r in mode.records
+            },
         }
         if request.apply and result.ok:
             save_calibration(result.as_updates(), runtime.machine_path)
             payload["applied"] = True
-            payload["note"] = "записано в machine.yaml; перезапустите сервер"
+            payload["note"] = "записано в machine.yaml; перезапустите сервер, чтобы применить"
         return payload

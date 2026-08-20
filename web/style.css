@@ -616,3 +616,5 @@ input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: var(--ring);
 .geo { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
 .geo label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; }
 .geo input { padding: 5px 6px; }
+
+.cable-name { display: inline-block; min-width: 3.5em; font-variant-numeric: tabular-nums; opacity: .8; }

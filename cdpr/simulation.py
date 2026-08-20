@@ -29,15 +29,19 @@ from cdpr.tension import GRAVITY
 
 log = logging.getLogger(__name__)
 
-#: жёсткость троса по умолчанию, Н (плетёнка на 50 кг)
-DEFAULT_EA_N = 4300.0
+#: жёсткость троса по умолчанию, Н.
+#  Капрон ⌀0.3 мм: E около 3 ГПа, сечение 0.07 мм^2 -> EA примерно 200 Н.
+#  Число намеренно маленькое: этот трос очень мягкий, и модель должна это
+#  показывать, иначе на симуляторе всё выглядит точнее, чем будет на деле.
+DEFAULT_EA_N = 200.0
 
 
 class PlatformSimulator:
     """Платформа на упругих тросах."""
 
     def __init__(self, machine: MachineConfig, *, ea_n: float | None = None,
-                 friction_percent: float = 1.5, floor_z_mm: float | None = None) -> None:
+                 friction_percent: float = 1.5, floor_z_mm: float | None = None,
+                 stop_distance_mm: float | None = None) -> None:
         self.machine = machine
         self.kinematics = CDPRKinematics.from_config(machine)
         self.winches = machine.ordered_winches()
@@ -45,10 +49,24 @@ class PlatformSimulator:
         self.ea_n = ea_n if ea_n is not None else (self.winches[0].ea_n or DEFAULT_EA_N)
         self.friction_percent = friction_percent
         self.weight_n = machine.platform.mass_kg * GRAVITY
-        # Пол. Без него платформе некуда садиться, а посадка — это основа
-        # калибровки: касание видно по одновременной разгрузке всех тросов.
-        self.floor_z_mm = (machine.platform.landing_height_mm
-                           if floor_z_mm is None else floor_z_mm)
+        # Пол: ниже него платформа не опустится.
+        self.floor_z_mm = 0.0 if floor_z_mm is None else floor_z_mm
+
+        # Упор в модуле. Ближе этого расстояния к точке схода коробка подойти
+        # не может — упирается в корпус. Без упора хоминг не на чем проверить:
+        # трос наматывался бы вечно, а натяжение так и не выросло бы, потому
+        # что почти вертикальный трос держит только вес.
+        if stop_distance_mm is not None:
+            self.stop_distance_mm = float(stop_distance_mm)
+        else:
+            inset = machine.homing.corner_inset_mm
+            sag = machine.geometry.sag_mm if machine.geometry.is_planar else 0.0
+            self.stop_distance_mm = float(np.hypot(inset, sag))
+        # Жёсткость упора. Корпус модуля жёстче троса, но не бесконечно:
+        # коробка, кронштейн и сам модуль немного пружинят. Слишком жёсткая
+        # модель даёт скачок натяжения на десятки ньютонов за один цикл, чего
+        # на железе не бывает, и хоминг выглядел бы хуже, чем он есть.
+        self.stop_stiffness_n_per_mm = 5.0
 
         self.pose = self.kinematics.anchors.mean(axis=0) - np.array([0.0, 0.0, 1500.0])
         self.tensions = np.zeros(len(self.winches))
@@ -79,16 +97,24 @@ class PlatformSimulator:
         # Единицы всюду ньютоны и миллиметры: жёсткость Н/мм, растяжение мм,
         # энергия Н*мм. Смешать здесь Н*м с Н*мм — значит ослабить вес в тысячу
         # раз, и платформа повиснет почти без натяжения.
+        stop = self.stop_distance_mm
+
         def energy(p: np.ndarray) -> float:
             distance = np.linalg.norm(self.kinematics.anchors - p, axis=1)
             stretch = np.maximum(0.0, distance - free)
-            return float(0.5 * np.sum(stiffness * stretch ** 2) + self.weight_n * p[2])
+            squeeze = np.maximum(0.0, stop - distance)   # упёрлись в корпус модуля
+            return float(
+                0.5 * np.sum(stiffness * stretch ** 2)
+                + 0.5 * self.stop_stiffness_n_per_mm * np.sum(squeeze ** 2)
+                + self.weight_n * p[2]
+            )
 
         def gradient(p: np.ndarray) -> np.ndarray:
             vectors = self.kinematics.anchors - p
             distance = np.linalg.norm(vectors, axis=1)
             unit = vectors / np.maximum(distance, 1e-9)[:, None]
             forces = stiffness * np.maximum(0.0, distance - free)
+            forces = forces - self.stop_stiffness_n_per_mm * np.maximum(0.0, stop - distance)
             grad = -(unit * forces[:, None]).sum(axis=0)
             grad[2] += self.weight_n
             return grad

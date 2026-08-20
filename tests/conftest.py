@@ -99,5 +99,18 @@ def profile():
 
 
 @pytest.fixture
+def undiscovered_profile():
+    """Профиль так, будто карта регистров ещё не снята с железа — для
+    инструментов разведки (scanner/reg_probe), которые именно это и находят."""
+    blank = load_profile().model_copy(deep=True)
+    blank.addressing.param_base = None
+    blank.addressing.param_ram_base = None
+    blank.addressing.monitor_base = None
+    blank.addressing.monitor_function = None
+    blank.eeprom_safe = None
+    return blank
+
+
+@pytest.fixture
 def fake_serial():
     return FakeSerial

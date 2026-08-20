@@ -292,7 +292,18 @@ def main(argv: list[str] | None = None) -> int:
     lo, hi = (int(x, 0) for x in args.sweep.split("-"))
 
     if args.sim:
-        transport = SimTransport("sim", profile, slaves=[args.slave], latency_ms=0.5,
+        # Репетиция должна изображать привод, карта которого ещё не снята —
+        # даже если в профиле она уже подтверждена мануалом. Иначе
+        # SimTransport возьмёт профиль как есть (реальные адреса, FC04 для
+        # мониторов) вместо синтетической раскладки, которую и должна найти
+        # разведка.
+        blank = profile.model_copy(deep=True)
+        blank.addressing.param_base = None
+        blank.addressing.param_ram_base = None
+        blank.addressing.monitor_base = None
+        blank.addressing.monitor_function = None
+        blank.eeprom_safe = None
+        transport = SimTransport("sim", blank, slaves=[args.slave], latency_ms=0.5,
                                  baudrate=args.baud, parity=args.parity,
                                  stopbits=args.stopbits, encoder_bits=args.encoder_bits)
         transport.open()

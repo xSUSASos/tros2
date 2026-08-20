@@ -58,15 +58,17 @@ def test_sim_profile_fills_known_addresses(profile):
 
 
 def test_sim_does_not_invent_unknown_parameters(profile):
-    """У параметров, номер которых в мануале не найден (ограничение момента),
-    адреса быть не должно: модель не имеет права обещать возможность,
-    которой на железе может не оказаться."""
+    """У параметров, номер которых неизвестен, адреса быть не должно: модель
+    не имеет права обещать возможность, которой на железе может не оказаться."""
     from cdpr.config import ConfigError
 
     sim = make_sim_profile(profile)
-    assert profile.params["torque_limit_fwd"].p is None
+    blank = next((name for name, spec in profile.params.items()
+                  if spec.p is None and spec.address is None), None)
+    if blank is None:
+        pytest.skip("в профиле не осталось параметров с неизвестным адресом")
     with pytest.raises(ConfigError):
-        sim.param_address("torque_limit_fwd")
+        sim.param_address(blank)
 
 
 def test_sim_profile_monitor_addresses_do_not_overlap(profile):
@@ -93,17 +95,21 @@ def sim(profile):
 
 def _read(sim, slave, monitor):
     spec = sim.profile.monitors[monitor]
-    regs = sim.read_registers(slave, spec.address, spec.words)
+    regs = sim.read_registers(slave, spec.address, spec.words,
+                              function=sim.profile.monitor_function_code())
     return decode(regs, spec.type)
 
 
-def test_disabled_axis_does_not_move(sim):
+def test_axis_stops_when_power_is_cut(sim):
+    """Аварийный стоп на этой машине — снятие питания кнопкой. Обесточенный
+    привод не крутится, что бы ни было записано в уставку."""
     addr = sim.profile.param_address("speed_preset_1")
     sim.write_register(1, addr, 500)
+    sim.set_enabled(1, False)
     before = _read(sim, 1, "actual_position")
     time.sleep(0.05)
     after = _read(sim, 1, "actual_position")
-    assert after == before, "без разрешения SON привод крутиться не должен"
+    assert after == before
 
 
 def test_enabled_axis_follows_setpoint(sim):

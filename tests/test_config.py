@@ -101,9 +101,12 @@ def test_unknown_bus_rejected(machine):
 
 def test_winch_defaults_are_merged(machine):
     """В YAML лебёдка задана одной строкой — остальное приходит из умолчаний."""
+    first = machine.winches[0]
     for w in machine.winches:
-        assert w.drum_diameter_mm == 60.0
-        assert w.encoder_counts_per_rev == 8_388_608
+        assert w.drum_diameter_mm == first.drum_diameter_mm
+        assert w.encoder_counts_per_rev == first.encoder_counts_per_rev
+        assert w.rated_torque_nm == first.rated_torque_nm
+        assert w.direction == first.direction
 
 
 # --------------------------------------------------------------------------- #
@@ -111,11 +114,30 @@ def test_winch_defaults_are_merged(machine):
 # --------------------------------------------------------------------------- #
 def test_profile_reports_addresses_unknown(profile):
     """Пока карта регистров не снята с железа, профиль честно об этом говорит."""
-    assert not profile.is_discovered
+    undiscovered = profile.model_copy(deep=True)
+    undiscovered.addressing.param_base = None
+    undiscovered.addressing.monitor_base = None
+    assert not undiscovered.is_discovered
     with pytest.raises(ConfigError, match="reg_probe"):
-        profile.param_address("speed_preset_1")
+        undiscovered.param_address("speed_preset_1")
     with pytest.raises(ConfigError, match="reg_probe"):
-        profile.monitor_address("actual_position")
+        undiscovered.monitor_address("encoder_bits_now")
+
+
+def test_profile_addresses_confirmed_by_manual(profile):
+    """Карта регистров подтверждена V3.3 (FC03 addr = P-xxx, таблица FC04) —
+    дефолтный профиль больше не требует reg_probe для выхода на железо."""
+    assert profile.is_discovered
+    assert profile.param_address("speed_preset_1") == 137
+    # Предел момента — единственная защита, не зависящая от софта; его номер
+    # обязан быть известен, иначе привод способен порвать трос.
+    assert profile.param_address("torque_limit_fwd") == 69
+    assert profile.param_address("torque_limit_rev") == 70
+    # Слежение идёт по АБСОЛЮТНОЙ позиции (0x1F/0x20), а не по счёту от
+    # включения питания (0x05/0x06): энкодер многооборотный, и его показания
+    # переживают снятие питания кнопкой аварийного стопа.
+    assert profile.monitor_address("actual_position") == 31
+    assert profile.monitor_address("position_from_power_on") == 5
 
 
 def test_profile_enum_encoding(profile):
@@ -149,7 +171,15 @@ def test_hot_register_is_the_speed_setpoint(profile):
 def test_eeprom_safety_unknown_until_probed(profile):
     """Пока не проверено, что горячий регистр не пишется в EEPROM,
     выходить на железо с циклом 50 Гц нельзя."""
-    assert profile.eeprom_safe is None
+    unprobed = profile.model_copy(deep=True)
+    unprobed.eeprom_safe = None
+    assert unprobed.eeprom_safe is None
+
+
+def test_eeprom_safety_confirmed_by_manual(profile):
+    """V3.3: FC06 пишет только в RAM, EEPROM требует явного FC41 — частая
+    запись hot_register ресурс EEPROM не расходует."""
+    assert profile.eeprom_safe is True
 
 
 def test_alarm_text(profile):
@@ -168,18 +198,18 @@ def test_patch_yaml_preserves_comments(tmp_path):
     before = io.open(dst, encoding="utf-8").read()
     assert "# ---" in before
 
-    patch_yaml(dst, {"tension.target_n": 41.5}, backup=False)
-    save_calibration({0: {"count_empty": 123456, "length_at_empty_mm": 7100.0}}, dst)
+    patch_yaml(dst, {"tension.target_n": 11.5}, backup=False)
+    save_calibration({0: {"count_ref": 123456, "length_at_ref_mm": 7100.0}}, dst)
 
     after = io.open(dst, encoding="utf-8").read()
     assert "# ---" in after, "комментарии не должны теряться при сохранении из панели"
-    assert "калибруется автоматически" in after
+    assert "заполняется хомингом" in after
 
     cfg = load_machine(dst)
-    assert cfg.tension.target_n == 41.5
-    assert cfg.winches[0].count_empty == 123456
-    assert cfg.winches[0].length_at_empty_mm == 7100.0
-    assert cfg.winches[1].count_empty is None
+    assert cfg.tension.target_n == 11.5
+    assert cfg.winches[0].count_ref == 123456
+    assert cfg.winches[0].length_at_ref_mm == 7100.0
+    assert cfg.winches[1].count_ref is None
 
 
 def test_save_calibration_refuses_non_calibration_fields(tmp_path):

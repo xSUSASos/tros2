@@ -7,7 +7,17 @@ from pydantic import BaseModel, Field
 
 
 class EnableRequest(BaseModel):
+    """Программное разрешение движения. Это не SON: приводы включены всегда,
+    питание с них снимает физическая кнопка."""
+
     on: bool
+
+
+class CableSpeedRequest(BaseModel):
+    """Ручное вращение одного барабана. Привязка для этого не нужна."""
+
+    index: int = Field(ge=0)
+    speed_mms: float
 
 
 class EstopRequest(BaseModel):
@@ -64,43 +74,16 @@ class ConfigPatchRequest(BaseModel):
     updates: dict[str, Any]
 
 
-class ProbeRequest(BaseModel):
-    """Посадка на точка посадки с известными координатами."""
+class HomingStartRequest(BaseModel):
+    """Хоминг: коробка подтягивается в углы и там записываются отсчёты.
 
-    x: float
-    y: float
-    z: float = 0.0
-    label: str = ""
-
-
-class CalibrationSolveRequest(BaseModel):
-    fit_elasticity: bool = True
-    apply: bool = False
-
-
-class GeometryFitRequest(BaseModel):
-    """Восстановление расположения модулей по простым замерам.
-
-    Расстояния — шесть штук, в порядке пар (1-2, 1-3, 1-4, 2-3, 2-4, 3-4),
-    от точки схода троса до точки схода. Высоты — четыре, над полом.
+    corners — индексы модулей. Одного достаточно для запуска; остальные
+    работают проверкой и дают жёсткость троса.
     """
 
-    distances_mm: list[float] = Field(min_length=6, max_length=6)
-    heights_mm: list[float] = Field(min_length=3, max_length=8)
-    apply: bool = False
-
-
-class HomingStartRequest(BaseModel):
-    step_mm: float = Field(default=400.0, gt=50.0, le=2000.0)
-    feed_mms: float = Field(default=25.0, gt=0, le=100.0)
-
-
-class HomingConfirmRequest(BaseModel):
-    """Замеры от каждого модуля до платформы на текущей стоянке."""
-
-    distances_mm: list[float] = Field(min_length=3, max_length=8)
+    corners: list[int] | None = None
+    feed_mms: float | None = Field(default=None, gt=0, le=100.0)
 
 
 class HomingSolveRequest(BaseModel):
-    fit_elasticity: bool = True
     apply: bool = False

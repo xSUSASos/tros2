@@ -139,8 +139,10 @@ def compute_map(
     elapsed = time.perf_counter() - started
 
     inset = machine.workspace.inset_mm
-    low = np.array([x0 + inset, y0 + inset, machine.workspace.z_min_mm])
-    high = np.array([x1 - inset, y1 - inset, machine.workspace.z_max_mm])
+    # Границы берутся из общей функции, а не собираются заново: иначе карта и
+    # проверка позы разошлись бы в том, что считается рабочей зоной, и панель
+    # показывала бы одно, а контур запрещал другое.
+    low, high = box_limits(machine, kin)
 
     result = WorkspaceMap(
         z_mm=z, xs=xs, ys=ys, margin_n=margin,
@@ -198,8 +200,14 @@ def box_limits(machine: MachineConfig, kinematics: CDPRKinematics) -> tuple[np.n
     inset = machine.workspace.inset_mm
     low = anchors.min(axis=0) + inset
     high = anchors.max(axis=0) - inset
-    low[2] = machine.workspace.z_min_mm
-    high[2] = machine.workspace.z_max_mm
+    if machine.geometry.is_planar:
+        # На плоской машине высота не диапазон, а одно число: коробка всегда в
+        # рабочей плоскости. Границы по Z совпадают, и любая цель по Z сама
+        # прижимается к ней обрезкой — отдельной проверки не нужно.
+        low[2] = high[2] = machine.geometry.plane_z_mm
+    else:
+        low[2] = machine.workspace.z_min_mm
+        high[2] = machine.workspace.z_max_mm
     return low, high
 
 

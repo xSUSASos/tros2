@@ -108,9 +108,9 @@ def test_dump_range_finds_islands_in_sparse_map(profile):
     assert 250 not in values, "несуществующие адреса не должны попадать в снимок"
 
 
-def test_dump_range_is_cheap_on_populated_region(profile):
+def test_dump_range_is_cheap_on_populated_region(undiscovered_profile):
     """На населённом участке блочное чтение экономит на порядок."""
-    sim = SimTransport("t", profile, slaves=[1], latency_ms=0.0)
+    sim = SimTransport("t", undiscovered_profile, slaves=[1], latency_ms=0.0)
     sim.open()
     start = sim.profile.monitor_address("actual_speed")
     n = 16  # внутри блока мониторов, без выхода за населённый участок
@@ -131,9 +131,9 @@ def test_dump_range_overhead_bounded_on_sparse_region(profile):
 # --------------------------------------------------------------------------- #
 #  Полный проход разведки против модели
 # --------------------------------------------------------------------------- #
-def test_full_discovery_pipeline(profile):
+def test_full_discovery_pipeline(undiscovered_profile):
     """От «ничего не известно» до адреса позиции и порядка слов."""
-    sim = SimTransport("t", profile, slaves=[2], latency_ms=0.0,
+    sim = SimTransport("t", undiscovered_profile, slaves=[2], latency_ms=0.0,
                        baudrate=115200, parity="E", stopbits=1)
     sim.open()
     truth = sim.profile

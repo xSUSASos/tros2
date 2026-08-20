@@ -51,26 +51,30 @@ def test_plan_reads_offsets_decode_correctly(profile):
 #  Защита от опасного пуска
 # --------------------------------------------------------------------------- #
 def test_refuses_hardware_without_register_map(machine, profile):
+    undiscovered = profile.model_copy(deep=True)
+    undiscovered.addressing.param_base = None
+    undiscovered.addressing.monitor_base = None
     with pytest.raises(ConfigError, match="reg_probe"):
-        build_drive_group(machine, profile, simulated=False)
+        build_drive_group(machine, undiscovered, simulated=False)
 
 
-def test_refuses_hardware_until_eeprom_checked(machine, profile):
-    """Главная защита проекта: цикл 50 Гц по EEPROM убивает привод за полчаса."""
+def test_unknown_eeprom_behaviour_does_not_block(machine, profile):
+    """Мануал V3.3 говорит прямо: FC06 пишет в RAM, в EEPROM значение попадает
+    только явной командой FC41. Значит гонять уставку скорости каждый цикл
+    безопасно, и запрещать выход на железо из-за непроверенного поля незачем."""
     discovered = make_sim_profile(profile)
     discovered.eeprom_safe = None
+    group = build_drive_group(machine, discovered, simulated=False)
+    assert group.n_axes == machine.n_cables
+
+
+def test_eeprom_unsafe_profile_is_refused(machine, profile):
+    """А вот если разведка ДОКАЗАЛА, что уставка ложится в EEPROM, работать
+    нельзя: цикл управления исчерпает его ресурс за десятки минут."""
+    discovered = make_sim_profile(profile)
+    discovered.eeprom_safe = False
     with pytest.raises(ConfigError, match="EEPROM"):
         build_drive_group(machine, discovered, simulated=False)
-
-
-def test_eeprom_check_can_be_waived_explicitly(machine, profile):
-    """Обойти защиту можно, но только осознанно — правкой конфига."""
-    discovered = make_sim_profile(profile)
-    discovered.eeprom_safe = None
-    relaxed = machine.model_copy(deep=True)
-    relaxed.safety.require_eeprom_check = False
-    group = build_drive_group(relaxed, discovered, simulated=False)
-    assert group.n_axes == machine.n_cables
 
 
 def test_simulated_group_needs_no_probing(machine, profile):
@@ -106,39 +110,34 @@ def test_initialize_raises_if_mode_did_not_stick(group, monkeypatch):
         group.initialize()
 
 
-def test_disabled_group_does_not_move(group):
-    group.set_speeds([300.0] * group.n_axes)
-    before = [s.position_counts for s in group.read_states()]
-    time.sleep(0.05)
-    after = [s.position_counts for s in group.read_states()]
-    assert before == after
-
-
-def test_enabled_group_moves(group):
-    group.enable(True)
+def test_group_moves_on_command(group):
+    """Разрешения приводов по Modbus у T3D нет: P-098 держит servo-on всегда,
+    а питание снимает физическая кнопка. Значит уставка действует сразу."""
     group.set_speeds([120.0, -120.0, 60.0, 0.0])
     time.sleep(0.1)
-    states = group.read_states()
+    # Фактическая скорость читается по кругу — по одной оси за цикл, чтобы не
+    # тратить на диагностику четыре транзакции из двенадцати. Значит и
+    # проверять её надо после полного оборота опроса.
+    for _ in range(group.n_axes):
+        states = group.read_states()
     assert states[0].speed_rpm > 50
     assert states[1].speed_rpm < -50
     assert abs(states[3].speed_rpm) < 5
 
 
-def test_disable_stops_before_removing_permission(group):
-    """Сначала обнуляются уставки, и только потом снимается разрешение —
-    иначе привод обесточится на ходу и платформа провиснет рывком."""
-    group.enable(True)
+def test_stop_zeroes_every_setpoint(group):
+    """Остановка обязана дойти до всех осей, а не до первых попавшихся."""
     group.set_speeds([200.0] * group.n_axes)
     time.sleep(0.05)
-    group.enable(False)
+    group.stop()
     time.sleep(0.15)
     assert all(abs(s.speed_rpm) < 5 for s in group.read_states())
     assert all(a.last_command_rpm == 0.0 for a in group.axes)
 
 
 def test_fractional_speed_is_dithered(group):
-    """1 об/мин это 1.6 мм/с троса: без дизеринга тонкий джог невозможен."""
-    group.enable(True)
+    """Уставка целочисленная, а один об/мин при барабане ⌀60 — это 3.1 мм/с
+    троса. Без дизеринга тонкое позиционирование невозможно."""
     axis = group.axes[0]
     sent = []
     original = axis.transport.write_register
@@ -159,7 +158,6 @@ def test_fractional_speed_is_dithered(group):
 def test_axis_failure_does_not_break_the_cycle(group):
     """Одна отвалившаяся ось не должна ронять опрос: остальные надо успеть
     остановить, а не бросить с прежней уставкой."""
-    group.enable(True)
     broken = group.axes[1]
     broken.transport = _DeadTransport()
     states = group.read_states()
@@ -181,7 +179,23 @@ class _DeadTransport:
         return "мёртвая"
 
 
+def test_torque_limit_is_written_to_the_drives(group, machine):
+    """Предел момента в приводе — единственная защита, не зависящая от софта.
+    Он выставляется при инициализации и больше не трогается."""
+    assert group.set_torque_limit(20.0) is True
+    assert group.torque_limit_applied
+    for axis in group.axes:
+        assert axis.read_param("torque_limit_fwd") == 20
+        # P-069 действует только в положительную сторону вращения. При
+        # direction: -1 привод крутится в минус, и активен один P-070 —
+        # поэтому писать надо оба, иначе предела фактически нет.
+        assert axis.read_param("torque_limit_rev") == 20
+
+
 def test_torque_limit_reports_when_parameter_unknown(group):
-    """Номер параметра ограничения момента в мануале не найден — драйвер
-    обязан честно сказать, что жёсткого предела натяжения пока нет."""
+    """Если номер параметра неизвестен, драйвер обязан честно сказать, что
+    жёсткого предела натяжения нет, а не сделать вид, что всё хорошо."""
+    group.profile.params["torque_limit_fwd"].p = None
+    group.profile.params["torque_limit_fwd"].address = None
     assert group.set_torque_limit(50.0) is False
+    assert group.torque_limit_applied is False

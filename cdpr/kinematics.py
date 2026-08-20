@@ -122,6 +122,63 @@ class CDPRKinematics:
         return solution.x, rms
 
     # ------------------------------------------------------------------ #
+    #  Прямая задача для плоской машины — в замкнутой форме
+    # ------------------------------------------------------------------ #
+    def forward_planar(self, lengths: np.ndarray, plane_z: float) -> tuple[np.ndarray, float]:
+        """Длины тросов -> положение, когда высота платформы известна заранее.
+
+        На плоской машине Z не управляется: платформа висит на постоянном
+        отдалении от плоскости якорей. Это убирает из задачи одну неизвестную,
+        и оставшиеся две находятся без всякого решателя.
+
+            r_i^2 = L_i^2 - (z_i - z)^2            плоское расстояние до якоря
+            (x - ax_i)^2 + (y - ay_i)^2 = r_i^2
+
+        Вычитая первое уравнение из остальных, квадраты сокращаются и остаётся
+        линейная система на (x, y). Три уравнения на две неизвестные решаются
+        наименьшими квадратами — лишнее измерение гасит шум.
+
+        Ни итераций, ни начального приближения, ни границ, ни зеркального
+        решения выше плоскости якорей: его здесь просто неоткуда взять.
+        """
+        lengths = np.asarray(lengths, dtype=float)
+        if lengths.shape != (self.m,):
+            raise KinematicsError(f"нужно {self.m} длин, передано {lengths.shape}")
+        if np.any(np.abs(self.attachments) > 1e-9):
+            raise KinematicsError(
+                "замкнутая форма выведена для точечной платформы; при ненулевых "
+                "точках крепления пользуйтесь forward()"
+            )
+
+        drop = self.anchors[:, 2] - float(plane_z)
+        flat = lengths ** 2 - drop ** 2
+        # Трос короче собственного вертикального перепада — так не бывает.
+        # Обычно это значит, что калибровка уехала или трос провис.
+        impossible = flat < 0.0
+        flat = np.clip(flat, 0.0, None)
+        radii = np.sqrt(flat)
+
+        xy = self.anchors[:, :2]
+        base = xy[0]
+        matrix = 2.0 * (xy[1:] - base)
+        rhs = (
+            (xy[1:] ** 2).sum(axis=1) - (base ** 2).sum()
+            - (radii[1:] ** 2 - radii[0] ** 2)
+        )
+        try:
+            solution, *_ = np.linalg.lstsq(matrix, rhs, rcond=None)
+        except np.linalg.LinAlgError as exc:
+            raise KinematicsError(f"якоря вырождены, положение не определяется: {exc}") from exc
+
+        pose = np.array([solution[0], solution[1], float(plane_z)])
+        residual = float(np.sqrt(np.mean((self.inverse(pose) - lengths) ** 2)))
+        if impossible.any():
+            # Невязку в этом случае занижать нельзя: она единственный признак
+            # того, что данные противоречивы, и по ней срабатывает защита.
+            residual = max(residual, float(np.max(np.sqrt(-(lengths ** 2 - drop ** 2)[impossible]))))
+        return pose, residual
+
+    # ------------------------------------------------------------------ #
     #  Структурная матрица
     # ------------------------------------------------------------------ #
     def structure_matrix(self, pose: np.ndarray) -> np.ndarray:
@@ -138,11 +195,18 @@ class CDPRKinematics:
 
 
 def workspace_bounds(machine: MachineConfig) -> tuple[np.ndarray, np.ndarray]:
-    """Габаритная коробка по якорям с учётом отступа и пределов по высоте."""
+    """Габаритная коробка по якорям с учётом отступа и пределов по высоте.
+
+    На плоской машине высота не диапазон, а одно число: платформа всегда в
+    рабочей плоскости, поэтому нижняя и верхняя границы по Z совпадают.
+    """
     anchors = np.array([a.pos for a in machine.geometry.anchors], dtype=float)
     inset = machine.workspace.inset_mm
     low = anchors.min(axis=0) + inset
     high = anchors.max(axis=0) - inset
-    low[2] = machine.workspace.z_min_mm
-    high[2] = machine.workspace.z_max_mm
+    if machine.geometry.is_planar:
+        low[2] = high[2] = machine.geometry.plane_z_mm
+    else:
+        low[2] = machine.workspace.z_min_mm
+        high[2] = machine.workspace.z_max_mm
     return low, high

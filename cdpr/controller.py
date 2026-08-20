@@ -9,10 +9,21 @@
 — величина вычисленная, и её ошибка вошла бы в контур как шум. Декартовы
 координаты нужны только для того, чтобы задать цель.
 
-Натяжение правится отдельным слагаемым и только вдоль нуль-пространства
-структурной матрицы: это единственное изменение длин, которое меняет натяжение,
-не сдвигая платформу. Для четырёх тросов такое направление одно — перетяжка
-диагональных пар.
+Отдельного регулятора натяжения здесь нет, и это не упущение. При четырёх
+тросах и трёх координатах общий уровень натяжения — не свободный параметр:
+его однозначно задаёт равновесие, а значит геометрия. Выбирается он высотой
+рабочей плоскости, а не алгоритмом. Роль, которую в жёстких системах играл бы
+преднатяг, здесь выполняет поправка на вытяжку: трос под нагрузкой длиннее
+свободного, и стравить надо ровно на эту разницу меньше.
+
+Различаются две длины, и путать их нельзя:
+
+    свободная    сколько троса стравлено с барабана — это меряет энкодер
+    геометрическая  расстояние от схода до платформы — это видит геометрия
+
+Связь между ними — вытяжка под текущим натяжением. При капроне ⌀0.3 мм она
+доходит до сотни миллиметров, то есть это не поправка второго порядка, а
+главный член.
 """
 from __future__ import annotations
 
@@ -66,18 +77,22 @@ class Controller:
         self._target_pose: np.ndarray | None = None
         self._target_tension_n = machine.tension.target_n
         self._last_desired: np.ndarray | None = None
+        self._tension_filtered: np.ndarray | None = None
+        self._setpoint: np.ndarray | None = None
+        self._setpoint_speed = 0.0
+        self._hold_target: np.ndarray | None = None
         self._listeners: list[Any] = []
+        self._last_contact = time.perf_counter()
         self.box_low, self.box_high = box_limits(machine, self.kinematics)
-        # Для прямой задачи границы шире рабочей зоны: она должна уметь
-        # показать, что платформа выехала за пределы, а не упереться в них.
-        # Сверху жёстко ограничиваем плоскостью якорей — выше платформа
-        # оказаться не может, а зеркальное решение лежит именно там.
+
+        # Границы для прямой задачи в пространственном случае: они должны быть
+        # шире рабочей зоны, чтобы задача умела показать выезд за пределы, но
+        # обязаны отсекать зеркальное решение выше плоскости якорей.
+        # На плоской машине они не нужны — там решение замкнутое и единственное.
         anchors = self.kinematics.anchors
         reach = float(np.max(anchors.max(axis=0) - anchors.min(axis=0)))
         self.fk_low = anchors.min(axis=0) - 0.5 * reach
         self.fk_high = anchors.max(axis=0) + 0.5 * reach
-        # Якоря обычно лежат в одной плоскости, поэтому вертикальный размах
-        # сам по себе нулевой — границы по высоте задаются отдельно.
         self.fk_high[2] = float(anchors[:, 2].min()) - 1.0
         self.fk_low[2] = min(machine.workspace.z_min_mm, self.fk_high[2] - reach)
 
@@ -102,23 +117,35 @@ class Controller:
             self._pending_mode = mode
 
     def estop(self, reason: str = "кнопка в панели") -> None:
-        """Аварийный стоп. Уставки обнуляются немедленно, не дожидаясь цикла."""
+        """Программный стоп: уставки в ноль немедленно, не дожидаясь цикла.
+
+        Настоящий аварийный стоп на этой машине — физическая кнопка, снимающая
+        питание с приводов. Софт им не управляет и не притворяется, что может.
+        Абсолютный энкодер переживает выключение, поэтому после обратного
+        включения отсчёты остаются верными и привязка не теряется.
+        """
         self.safety.trigger_estop(reason)
         try:
             self.drives.stop()
-            self.drives.enable(False)
         except Exception as exc:  # noqa: BLE001 — стоп обязан пройти до конца
             log.error("при аварийном стопе: %s", exc)
-        log.warning("АВАРИЙНЫЙ СТОП: %s", reason)
+        log.warning("СТОП: %s", reason)
 
     def clear_estop(self) -> None:
         self.safety.clear_estop()
         self.set_mode(IdleMode())
 
-    def enable(self, on: bool) -> None:
+    def allow_motion(self, on: bool) -> None:
+        """Программное разрешение движения.
+
+        Это не SON и не силовое разрешение — приводы включены всегда. Это
+        предохранитель от случайной команды: пока он снят, на шину уходят
+        нули, что бы ни насчитал режим.
+        """
         if on and self.safety.estop:
             raise RuntimeError("сначала снимите аварийный стоп")
-        self.drives.enable(on)
+        if not on:
+            self.drives.stop()
         self.state.enabled = on
 
     def add_listener(self, callback) -> None:
@@ -186,42 +213,69 @@ class Controller:
         st.alarms = [s.alarm for s in states]
         st.speeds_rpm = np.array([s.speed_rpm for s in states])
         st.estop = self.safety.estop
-        st.enabled = self.drives.axes[0].state.enabled if hasattr(self.drives, "axes") else st.enabled
 
         counts = np.array([s.position_counts for s in states])
         tensions = self._tensions_from_states(states, counts)
         st.tensions_n = tensions
+        smooth = self._smooth_tensions(tensions, dt)
         st.tension_min_n = float(tensions.min()) if tensions.size else 0.0
         st.tension_max_n = float(tensions.max()) if tensions.size else 0.0
 
-        lengths = self._lengths_from_counts(counts, tensions)
-        st.lengths_mm = lengths
+        free = self._free_lengths(counts)
+        geometric = self._geometric_lengths(free, smooth)
+        st.free_lengths_mm = free
+        st.lengths_mm = geometric
 
-        pose, residual = self._solve_pose(lengths)
+        pose, residual = self._solve_pose(geometric)
         st.pose_mm = pose
         st.fk_residual_mm = residual
         st.homed = self.machine.is_calibrated
 
+        # Сторожевой таймер шины: если ни одна ось не отозвалась дольше
+        # положенного, дальше считать не по чему, и продолжать выдавать
+        # прежние уставки — худшее из возможного.
+        if any(s.online for s in states):
+            self._last_contact = time.perf_counter()
+        silence_ms = (time.perf_counter() - self._last_contact) * 1000.0
+        bus_dead = silence_ms > self.machine.control.watchdog_ms
+
         verdict = self.safety.check(
             states=states, pose=pose, tensions=tensions,
             fk_residual_mm=residual, moving=not isinstance(mode, IdleMode),
+            guard_model=not mode.tolerates_slack,
+            tension_ceiling_n=mode.tension_ceiling_n,
         )
         st.health = verdict.health
-        st.messages = verdict.reasons
+        st.messages = list(verdict.reasons)
 
-        if verdict.stop:
+        if bus_dead:
+            st.health = Health.FAULT
+            st.messages.append(
+                f"шина молчит {silence_ms:.0f} мс при пределе "
+                f"{self.machine.control.watchdog_ms:.0f} мс — уставки обнулены"
+            )
+
+        if verdict.stop or bus_dead or not st.enabled:
             self.drives.stop()
-            if verdict.disable and self.state.enabled:
-                self.drives.enable(False)
-                self.state.enabled = False
             st.commands_rpm = np.zeros(self.drives.n_axes)
+            if not st.enabled and not verdict.stop and not bus_dead:
+                st.messages.append("движение не разрешено")
+            # Остановка обязана ЗАВЕРШИТЬ операцию, а не подвесить её. Пока
+            # машина стоит, mode.update не вызывается — значит режим не
+            # отсчитывает своё время, не видит таймаута и не может закончиться
+            # сам. Оператор в такой ситуации смотрит на замерший экран и не
+            # понимает, идёт что-то или нет.
+            if (verdict.stop or bus_dead) and not isinstance(mode, IdleMode):
+                log.warning("режим %s прерван: %s", mode.name.value,
+                            "; ".join(st.messages[:2]) or "остановка")
+                self.set_mode(IdleMode())
             self._notify(st)
             return st
 
         output = mode.update(self, dt)
         if output.message:
             st.messages.append(output.message)
-        rpm = self._compute_commands(output, pose, lengths, tensions, dt)
+        rpm = self._compute_commands(output, pose, free, geometric, smooth, dt)
         st.commands_rpm = rpm
         self.drives.set_speeds(rpm)
 
@@ -233,7 +287,7 @@ class Controller:
     def _switch_mode(self, mode: Mode) -> None:
         if mode.requires_homing and not self.machine.is_calibrated:
             log.warning(
-                "режим %s требует калибровки: без неё отсчёт энкодера "
+                "режим %s требует привязки: без неё отсчёт энкодера "
                 "не перевести в длину троса", mode.name.value,
             )
         try:
@@ -241,6 +295,9 @@ class Controller:
         except Exception as exc:  # noqa: BLE001
             log.error("при выходе из режима %s: %s", self._mode.name.value, exc)
         self._mode = mode
+        self._setpoint = None
+        self._setpoint_speed = 0.0
+        self._hold_target = None
         mode.enter(self)
         log.info("режим: %s", mode.describe())
 
@@ -260,36 +317,76 @@ class Controller:
         for i, (state, winch, line) in enumerate(zip(states, self.winches, self.lines, strict=True)):
             try:
                 radius = line.radius_at(line.turns_at(int(counts[i])))
-            except Exception:  # noqa: BLE001 — до калибровки радиус берём первого слоя
+            except Exception:  # noqa: BLE001 — до привязки радиус берём первого слоя
                 radius = winch.first_layer_radius_mm
             out[i] = abs(winch.torque_percent_to_force(state.torque_percent, radius))
         return out
 
-    def _lengths_from_counts(self, counts: np.ndarray, tensions: np.ndarray) -> np.ndarray | None:
-        """Отсчёты энкодеров -> расстояния от схода до платформы.
+    def _smooth_tensions(self, tensions: np.ndarray, dt: float) -> np.ndarray:
+        """Сглаженное натяжение — только для расчёта вытяжки.
 
-        Свободная длина берётся по послойной модели намотки, затем к ней
-        добавляется вытяжка под текущим натяжением — геометрия платформы
-        «видит» именно растянутый трос.
+        Защиты смотрят на сырое значение: там важно не проспать всплеск. А вот
+        в длину этот шум переходить не должен: момент квантован целыми
+        процентами, и при мягком тросе один процент — это больше сантиметра
+        кажущейся длины.
+        """
+        tau = self.machine.control.tension_filter_s
+        if self._tension_filtered is None or self._tension_filtered.shape != tensions.shape:
+            self._tension_filtered = tensions.copy()
+        elif tau > 0 and dt > 0:
+            self._tension_filtered += min(1.0, dt / tau) * (tensions - self._tension_filtered)
+        else:
+            self._tension_filtered = tensions.copy()
+        return self._tension_filtered
+
+    def _ea_or_inf(self) -> np.ndarray:
+        """Жёсткость тросов; для незаданной — бесконечность, то есть без поправки."""
+        return np.array([w.ea_n if w.ea_n else np.inf for w in self.winches], dtype=float)
+
+    def _free_lengths(self, counts: np.ndarray) -> np.ndarray | None:
+        """Отсчёты энкодеров -> сколько троса стравлено с барабана.
+
+        Это ровно та величина, которой управляет мотор, и именно по ней идёт
+        слежение. Расстояние до платформы отсюда получается прибавлением
+        вытяжки — см. `_geometric_lengths`.
         """
         if not self.machine.is_calibrated:
             return None
-        out = np.zeros(len(counts))
-        for i, line in enumerate(self.lines):
-            free = line.length_from_counts(int(counts[i]))
-            out[i] = line.stretched(free, float(tensions[i]))
-        return out
+        return np.array([
+            line.length_from_counts(int(counts[i])) for i, line in enumerate(self.lines)
+        ])
+
+    def _geometric_lengths(
+        self, free: np.ndarray | None, tensions: np.ndarray
+    ) -> np.ndarray | None:
+        """Свободная длина + вытяжка под нагрузкой = расстояние до платформы.
+
+        Геометрия «видит» именно растянутый трос, поэтому прямую задачу надо
+        решать по этим длинам, а не по показаниям энкодера напрямую.
+        """
+        if free is None:
+            return None
+        return np.array([
+            line.stretched(float(free[i]), float(tensions[i]))
+            for i, line in enumerate(self.lines)
+        ])
 
     def _solve_pose(self, lengths: np.ndarray | None) -> tuple[np.ndarray | None, float]:
         if lengths is None:
             return None, 0.0
-        if self._last_pose is not None:
-            guess = self._last_pose
+        if self.machine.geometry.is_planar:
+            # Высота известна заранее, поэтому решение замкнутое: ни итераций,
+            # ни начального приближения, ни зеркального решения.
+            pose, residual = self.kinematics.forward_planar(
+                lengths, self.machine.geometry.plane_z_mm
+            )
         else:
-            guess = 0.5 * (self.box_low + self.box_high)
-        pose, residual = self.kinematics.forward(
-            lengths, guess=guess, bounds=(self.fk_low, self.fk_high)
-        )
+            guess = self._last_pose
+            if guess is None:
+                guess = 0.5 * (self.box_low + self.box_high)
+            pose, residual = self.kinematics.forward(
+                lengths, guess=guess, bounds=(self.fk_low, self.fk_high)
+            )
         self._last_pose = pose
         return pose, residual
 
@@ -300,91 +397,153 @@ class Controller:
         self,
         output: ModeOutput,
         pose: np.ndarray | None,
-        lengths: np.ndarray | None,
+        free: np.ndarray | None,
+        geometric: np.ndarray | None,
         tensions: np.ndarray,
         dt: float,
     ) -> np.ndarray:
         n = self.drives.n_axes
 
         if output.cable_velocity_mms is not None:
-            # Режим правит тросы напрямую (выборка слабины, калибровка) —
-            # вмешиваться в это регулировкой натяжения нельзя.
-            return self._to_rpm(np.asarray(output.cable_velocity_mms, dtype=float), lengths)
+            # Режим правит тросы напрямую (выборка слабины, хоминг) — там
+            # положение платформы либо неизвестно, либо неважно.
+            return self._to_rpm(np.asarray(output.cable_velocity_mms, dtype=float), free)
 
-        if output.hold or output.target_pose is None or pose is None or lengths is None:
-            winding = np.zeros(n)
+        if pose is None or free is None or geometric is None:
+            return np.zeros(n)
+
+        # Ожидание — это не «ничего не делать»: держать надо и положение, и
+        # натяжение. Цель при этом просто равна текущему положению, и общий
+        # закон управления работает без исключений.
+        hold = output.hold or output.target_pose is None
+        winding = self._track_pose(output, pose, geometric, tensions, dt, hold=hold)
+        return self._to_rpm(winding, free)
+
+    def _track_pose(
+        self, output: ModeOutput, pose: np.ndarray, geometric: np.ndarray,
+        tensions: np.ndarray, dt: float, *, hold: bool,
+    ) -> np.ndarray:
+        """Слежение за целевым положением по длинам тросов.
+
+        Ошибка считается в ГЕОМЕТРИЧЕСКИХ длинах — расстояниях до якоря, — а не
+        в свободных, которые меряет энкодер. Разница принципиальная. Свободная
+        длина связана с геометрической через натяжение; если сравнивать
+        измеренную свободную с желаемой свободной, натяжение входит в ошибку
+        дважды и с разных сторон. Получается алгебраическая петля: контур
+        начинает гоняться за собственным хвостом и уводит платформу вместо
+        того, чтобы её удерживать. В геометрических длинах эти члены
+        сокращаются, и остаётся честная ошибка положения.
+        """
+        if hold:
+            # Точка удержания запоминается один раз. Брать текущее положение
+            # каждый цикл нельзя: тогда любой снос немедленно становится новой
+            # целью, восстанавливающей силы не остаётся вовсе, и платформа
+            # медленно уползает — тем быстрее, чем шумнее измерения.
+            if self._hold_target is None:
+                self._hold_target = pose.copy()
+            target = self._hold_target
         else:
-            winding = self._track_pose(output, pose, lengths)
-
-        # Натяжение держится всегда, в том числе в ожидании: стоять на месте
-        # и при этом дать тросам провиснуть — значит потерять управляемость
-        # ровно в тот момент, когда её труднее всего вернуть.
-        if pose is not None and lengths is not None:
-            winding = winding + self._tension_correction(pose, tensions)
-
-        return self._to_rpm(winding, lengths)
-
-    def _track_pose(self, output: ModeOutput, pose: np.ndarray, lengths: np.ndarray) -> np.ndarray:
-        """Слежение по длинам тросов за целевым положением."""
-        target = np.asarray(output.target_pose, dtype=float)
-        target = np.clip(target, self.box_low, self.box_high)
+            self._hold_target = None
+            target = np.clip(np.asarray(output.target_pose, dtype=float), self.box_low, self.box_high)
         self._target_pose = target
         self.state.target_mm = target
 
-        target_lengths = self.kinematics.inverse(target)
-        self.state.target_lengths_mm = target_lengths
+        # ── ползущая уставка ─────────────────────────────────────────────
+        # Между текущим положением и целью движется отдельная точка — она и
+        # есть то, за чем следит контур. Без неё поправка по длине оказалась бы
+        # пропорциональна всему расстоянию до цели и перебивала бы подачу:
+        # команда «ехать 20 мм/с» на дальнюю точку выливалась бы в рывок на
+        # предельных оборотах. С уставкой подача означает ровно то, что
+        # написано, а поправка остаётся маленькой — она правит только ошибку
+        # слежения, а не всю дистанцию.
+        setpoint, velocity = self._advance_setpoint(pose, target, output, dt, hold=hold)
+        target_geometric = self.kinematics.inverse(setpoint)
+        self.state.target_lengths_mm = target_geometric
+        self.state.target_tensions_n = self._equilibrium_tensions(setpoint)
 
-        feed = output.feed_mms if output.feed_mms is not None else self.machine.motion.max_velocity_mms
-        feed = min(feed, self.machine.motion.max_velocity_mms)
+        distance = float(np.linalg.norm(target - pose))
+        self.state.arrived = bool(hold or distance <= self.machine.control.arrival_tolerance_mm)
 
-        # желаемая скорость платформы: пропорционально ошибке, с ограничением
-        error = target - pose
-        distance = float(np.linalg.norm(error))
-        if distance < 1e-6:
-            velocity = np.zeros(3)
-        else:
-            speed = min(feed, self.machine.control.position_kp * distance)
-            velocity = error / distance * speed
-
+        # ── прямая связь: скорость уставки -> скорости тросов ────────────
+        # Все четыре команды выведены из одного вектора скорости, поэтому в
+        # движении они согласованы по построению и тросы не тянут друг против
+        # друга, что бы ни было с моделью.
         feedforward = self.kinematics.winding_rates(pose, velocity)
 
-        # Поправка по длинам держит точность, потому что длина измеряется
-        # напрямую, а положение платформы — величина вычисленная.
-        #
-        # Но задать все четыре длины из обратной задачи нельзя: степеней
-        # свободы три, и четвёртая длина не свободна — именно она отвечает за
-        # внутреннее натяжение. Если править её наравне с остальными, контур
-        # положения переопределит систему и погасит регулировку натяжения.
-        # Поэтому ошибка длин проецируется на то подпространство, которое
-        # соответствует движению платформы; оставшееся направление отдано
-        # контуру натяжения, и они не мешают друг другу.
-        error = lengths - target_lengths
-        projected = self._project_to_motion(pose, error)
-        return feedforward + self.machine.control.position_kp * projected
+        # ── поправка по длинам ───────────────────────────────────────────
+        # Длина измеряется энкодером напрямую, поэтому именно она убирает
+        # накопленную ошибку. Она же подбирает провисший трос: у него
+        # расстояние до якоря выходит больше, чем требует геометрия.
+        error = geometric - target_geometric
+        deadband = self.machine.control.length_deadband_mm
+        if deadband > 0:
+            error = np.where(np.abs(error) < deadband, 0.0, error)
+        # Чтобы изменить расстояние до якоря на dx, стравить надо чуть меньше:
+        # под нагрузкой трос длиннее свободного. Множитель близок к единице и
+        # на устойчивость не влияет, но пусть будет верным.
+        scale = 1.0 / (1.0 + np.asarray(tensions, dtype=float) / self._ea_or_inf())
+        correction = self.machine.control.position_kp * error * scale
+        return feedforward + correction
 
-    def _project_to_motion(self, pose: np.ndarray, vector: np.ndarray) -> np.ndarray:
-        """Оставляет только ту часть вектора длин, которая двигает платформу."""
-        try:
-            basis, _ = np.linalg.qr(self.kinematics.jacobian(pose))
-        except np.linalg.LinAlgError:
-            return vector
-        return basis @ (basis.T @ vector)
+    def _advance_setpoint(
+        self, pose: np.ndarray, target: np.ndarray, output: ModeOutput,
+        dt: float, *, hold: bool,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Двигает уставку к цели с заданной подачей и ограничением разгона.
 
-    def _tension_correction(self, pose: np.ndarray, tensions: np.ndarray) -> np.ndarray:
-        """Поправка натяжения вдоль нуль-пространства структурной матрицы.
-
-        Только это направление меняет натяжение, не сдвигая платформу.
-        Всё остальное двигало бы её вместо того, чтобы подтянуть тросы.
+        Возвращает новое положение уставки и её скорость. Разгон ограничен не
+        ради красоты профиля: на мягком тросе рывок раскачивает коробку, и
+        успокаивается она долго.
         """
-        if tensions.size != self.drives.n_axes:
-            return np.zeros(self.drives.n_axes)
+        n_dim = len(target)
+        if self._setpoint is None:
+            self._setpoint = pose.copy()
+            self._setpoint_speed = 0.0
+        if hold:
+            self._setpoint = target.copy()
+            self._setpoint_speed = 0.0
+            return self._setpoint, np.zeros(n_dim)
+
+        limit = self.machine.motion.max_velocity_mms
+        feed = min(output.feed_mms if output.feed_mms is not None else limit, limit)
+
+        delta = target - self._setpoint
+        distance = float(np.linalg.norm(delta))
+        if distance < 1e-9:
+            self._setpoint_speed = 0.0
+            return self._setpoint, np.zeros(n_dim)
+
+        accel = self.machine.motion.max_acceleration_mms2
+        # Тормозить надо заранее: с этой скорости до нуля нужно v^2/(2a).
+        stopping = min(feed, float(np.sqrt(2.0 * accel * distance)))
+        step = accel * dt
+        self._setpoint_speed = float(np.clip(stopping, self._setpoint_speed - step,
+                                             self._setpoint_speed + step))
+
+        direction = delta / distance
+        travel = self._setpoint_speed * dt
+        if travel >= distance:
+            self._setpoint = target.copy()
+            return self._setpoint, direction * (distance / dt if dt > 0 else 0.0)
+        self._setpoint = self._setpoint + direction * travel
+        return self._setpoint, direction * self._setpoint_speed
+
+    def _equilibrium_tensions(self, pose: np.ndarray) -> np.ndarray:
+        """Натяжения, при которых платформа в этой позе стоит в равновесии.
+
+        Используется как модель, а не как регулятор: по ним считается вытяжка
+        троса. Регулировать натяжение отдельно в такой машине нельзя — при
+        четырёх тросах и трёх координатах равновесие задаёт его однозначно.
+        """
+        n = self.drives.n_axes
+        fallback = np.full(n, self._target_tension_n)
         try:
             W = self.kinematics.structure_matrix(pose)
-        except Exception:  # noqa: BLE001
-            return np.zeros(self.drives.n_axes)
+        except Exception:  # noqa: BLE001 — вырожденная поза, дальше не считаем
+            return fallback
 
         wrench = T.gravity_wrench(self.machine.platform.mass_kg)
-        desired = T.distribute(
+        solution = T.distribute(
             W, wrench,
             f_min=self.machine.tension.min_n,
             f_max=self.machine.tension.max_n,
@@ -392,33 +551,23 @@ class Controller:
             # Предпочитаем прошлое решение, а не текущие измерения: при
             # симметричном состоянии оба варианта равноудалены от измерений,
             # и без памяти выбор скакал бы каждый цикл.
-            f_prefer=self._last_desired if self._last_desired is not None else tensions,
+            f_prefer=self._last_desired,
         )
-        if desired.feasible:
-            self._last_desired = desired.forces.copy()
-        self.state.target_tensions_n = desired.forces
-        self.state.margin_n = desired.margin_n
-        if not desired.feasible:
-            return np.zeros(self.drives.n_axes)
+        self.state.margin_n = solution.margin_n
+        if not solution.feasible:
+            return fallback
+        self._last_desired = solution.forces.copy()
+        return solution.forces
 
-        basis = T.null_space(W)
-        if basis.shape[1] == 0:
-            return np.zeros(self.drives.n_axes)
-        direction = basis[:, 0] / np.linalg.norm(basis[:, 0])
-        error = float(direction @ (desired.forces - tensions))
-        if abs(error) < self.machine.control.tension_deadband_n:
-            return np.zeros(self.drives.n_axes)
-        return self.machine.control.tension_kp * error * direction
-
-    def _to_rpm(self, winding_mms: np.ndarray, lengths: np.ndarray | None) -> np.ndarray:
+    def _to_rpm(self, winding_mms: np.ndarray, free: np.ndarray | None) -> np.ndarray:
         """Скорости выборки троса -> уставки моторов, с ограничением по оборотам."""
         rpm = np.zeros(len(winding_mms))
         for i, (line, winch) in enumerate(zip(self.lines, self.winches, strict=True)):
             speed = float(winding_mms[i])
             try:
-                count = line.counts_from_length(float(lengths[i])) if lengths is not None else 0
+                count = line.counts_from_length(float(free[i])) if free is not None else 0
                 value = line.rpm_for_line_speed(speed, count)
-            except Exception:  # noqa: BLE001 — до калибровки считаем по первому слою
+            except Exception:  # noqa: BLE001 — до привязки считаем по первому слою
                 radius = winch.first_layer_radius_mm
                 value = winch.direction * speed * 60.0 / (2 * np.pi * radius) * winch.gear_ratio
             rpm[i] = float(np.clip(value, -winch.max_rpm, winch.max_rpm))
@@ -426,8 +575,9 @@ class Controller:
 
     # ------------------------------------------------------------------ #
     def describe(self) -> str:
+        shape = "плоская" if self.machine.geometry.is_planar else "пространственная"
         return (
-            f"машина {self.machine.name!r}: {self.drives.n_axes} тросов, "
+            f"машина {self.machine.name!r}: {self.drives.n_axes} тросов, {shape}, "
             f"цикл {self.machine.control.loop_hz:.0f} Гц, режим {self._mode.name.value}, "
-            f"{'откалибрована' if self.machine.is_calibrated else 'НЕ откалибрована'}"
+            f"{'привязана' if self.machine.is_calibrated else 'НЕ привязана'}"
         )

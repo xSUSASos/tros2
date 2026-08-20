@@ -70,18 +70,17 @@ class Runtime:
 
 
 def _fill_simulated_calibration(machine: MachineConfig, *, drum_capacity_mm: float = 14_000.0) -> None:
-    """Проставляет калибровку для модели.
+    """Проставляет привязку для модели.
 
-    На железе эти числа даёт калибровка по точкам посадки; модели же нужно с чего-то
-    начать, поэтому берём «барабан пуст при нулевом отсчёте, троса намотано
-    столько-то». Физику это не искажает: калибровочные параметры на то и
-    параметры, что модель работает при любых их значениях.
+    На железе эти числа даёт хоминг по углам; модели же нужно с чего-то
+    начать, поэтому берём произвольную опорную точку. Физику это не искажает:
+    привязка на то и привязка, что модель работает при любых её значениях.
     """
     for winch in machine.winches:
-        if winch.count_empty is None:
-            winch.count_empty = 0
-        if winch.length_at_empty_mm is None:
-            winch.length_at_empty_mm = drum_capacity_mm
+        if winch.count_ref is None:
+            winch.count_ref = 0
+        if winch.length_at_ref_mm is None:
+            winch.length_at_ref_mm = drum_capacity_mm
         if winch.ea_n is None:
             winch.ea_n = DEFAULT_EA_N
 
@@ -118,10 +117,15 @@ def build_runtime(
             platform.attach(transport, slaves)
 
         centre = platform.kinematics.anchors.mean(axis=0)
-        pose = np.asarray(start_pose_mm, dtype=float) if start_pose_mm is not None else np.array(
-            [centre[0], centre[1], machine.workspace.z_min_mm
-             + 0.4 * (machine.workspace.z_max_mm - machine.workspace.z_min_mm)]
-        )
+        if start_pose_mm is not None:
+            pose = np.asarray(start_pose_mm, dtype=float)
+        elif machine.geometry.is_planar:
+            pose = np.array([centre[0], centre[1], float(machine.geometry.plane_z_mm)])
+        else:
+            pose = np.array(
+                [centre[0], centre[1], machine.workspace.z_min_mm
+                 + 0.4 * (machine.workspace.z_max_mm - machine.workspace.z_min_mm)]
+            )
         counts = platform.place_at(pose)
         for i, anchor in enumerate(machine.geometry.anchors):
             axis = drives.transports[anchor.bus].axes[anchor.slave]

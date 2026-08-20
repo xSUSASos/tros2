@@ -43,12 +43,14 @@ def test_state_has_everything_the_panel_needs(client):
         assert key in data
 
 
-def test_enable_reports_how_permission_works(client):
-    """Панель обязана показывать, может ли софт снять разрешение сам:
-    от этого зависит, что на самом деле делает кнопка аварийного стопа."""
+def test_enable_is_a_software_gate_only(client):
+    """Разрешения приводов по Modbus у T3D нет: servo-on держит P-098, а
+    питание снимает физическая кнопка. Кнопка в панели — программный
+    предохранитель, и панель обязана говорить об этом прямо, а не изображать
+    силовое разрешение."""
     data = client.post("/api/enable", json={"on": True}).json()
     assert data["enabled"] is True
-    assert "automatic" in data and "note" in data
+    assert "питание" in data["note"]
 
 
 def test_estop_and_recovery(client):
@@ -69,9 +71,10 @@ def test_enable_refused_while_estopped(client):
 
 
 def test_mdi_rejects_unreachable_target(client):
-    """Ехать в точку, где платформу не удержать, нельзя — и отказ должен
+    """Ехать в точку, где коробку не удержать, нельзя — и отказ должен
     объяснять причину, а не просто возвращать ошибку."""
-    response = client.post("/api/mdi", json={"x": 300, "y": 300, "z": 1000})
+    low = client.runtime.controller.box_low
+    response = client.post("/api/mdi", json={"x": low[0] + 1, "y": low[1] + 1, "z": 0})
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert "удержать" in detail or "запас" in detail or "габарит" in detail
@@ -79,9 +82,23 @@ def test_mdi_rejects_unreachable_target(client):
 
 def test_mdi_accepts_reachable_target(client):
     client.post("/api/enable", json={"on": True})
-    response = client.post("/api/mdi", json={"x": 3000, "y": 2500, "z": 1100, "feed_mms": 150})
+    centre = 0.5 * (client.runtime.controller.box_low + client.runtime.controller.box_high)
+    response = client.post("/api/mdi",
+                           json={"x": centre[0], "y": centre[1], "z": 0, "feed_mms": 100})
     assert response.status_code == 200
     assert response.json()["margin_n"] > 0
+
+
+def test_mdi_ignores_z_on_a_planar_machine(client):
+    """Z не управляется: что бы ни прислала панель, коробка остаётся в
+    рабочей плоскости."""
+    machine = client.runtime.machine
+    if not machine.geometry.is_planar:
+        pytest.skip("машина не плоская")
+    centre = 0.5 * (client.runtime.controller.box_low + client.runtime.controller.box_high)
+    data = client.post("/api/mdi",
+                       json={"x": centre[0], "y": centre[1], "z": 99_000}).json()
+    assert data["target"][2] == pytest.approx(machine.geometry.plane_z_mm)
 
 
 def test_jog_and_tension(client):
@@ -104,7 +121,7 @@ def test_gcode_rejects_program_outside_workspace(client):
 
 
 def test_gcode_accepts_good_program_and_plans_it(client):
-    text = "G21 G90\nF3000\nG1 X2600 Y2100 Z1100\nG1 X3400\nG1 Y2900\n"
+    text = "G21 G90\nF3000\nG1 X1400 Y800\nG1 X2400\nG1 Y1100\n"
     response = client.post("/api/gcode/load", json={"text": text}).json()
     assert response["ok"] is True
     assert response["duration_s"] > 0
@@ -138,15 +155,33 @@ def test_config_patch_rejects_typos(client):
     assert "опечатка" in response.json()["detail"]
 
 
-def test_calibration_requires_points(client):
-    client.post("/api/calibration/clear")
-    response = client.post("/api/calibration/solve", json={"apply": False})
+def test_homing_solve_requires_a_visited_corner(client):
+    """Привязку не из чего считать, пока коробка не побывала ни в одном углу."""
+    client.post("/api/homing/abort")
+    response = client.post("/api/homing/solve", json={"apply": False})
     assert response.status_code == 400
-    assert "две точки" in response.json()["detail"]
+    assert "угол" in response.json()["detail"]
+
+
+def test_homing_starts_and_reports_progress(client):
+    """Хоминг обязан идти без привязки: он её и добывает."""
+    started = client.post("/api/homing/start", json={"corners": [0]}).json()
+    assert started["ok"] and started["corners"] == [0]
+    client.runtime.step(0.02)
+    status = client.get("/api/homing/status").json()
+    assert status["running"] and status["corner"] == 0
+    assert client.post("/api/homing/abort").json()["ok"]
+
+
+def test_cable_mode_works_without_calibration(client):
+    """Первое, что должно работать на новой машине: покрутить барабан кнопкой."""
+    data = client.post("/api/cable/speed", json={"index": 2, "speed_mms": -15.0}).json()
+    assert data["velocity_mms"][2] == pytest.approx(-15.0)
+    assert client.post("/api/cable/stop").json()["ok"]
 
 
 def test_workspace_map_is_served(client):
-    data = client.get("/api/workspace?z=1000&step=600").json()
+    data = client.get("/api/workspace?step=400").json()
     assert len(data["margin_n"]) == len(data["ys"])
     assert 0.0 <= data["area_fraction"] <= 1.0
 

@@ -117,13 +117,14 @@ function applyInfo() {
   $("jog-feed-value").textContent = `${S.jogFeed} мм/с`;
   $("mdi-f").value = Math.round(S.info.motion.jog_feed_mms);
 
-  if (!S.info.enable_automatic) {
-    banner("Разрешение приводов заведено на ручной тумблер: кнопка аварийного стопа в панели " +
-           "только обнулит скорости. Настоящий стоп — размыкание цепи SON, держите его под рукой.");
+  if (!S.info.simulated) {
+    banner("Кнопка аварийного стопа в панели только обнуляет уставки. Настоящий стоп — " +
+           "кнопка, снимающая питание с приводов: держите её под рукой. Энкодер " +
+           "абсолютный, привязка после этого не теряется.");
   }
-  if (S.info.eeprom_safe !== true && !S.info.simulated) {
-    banner("Не проверено, что уставку скорости можно писать часто. Прогоните tools/reg_probe.py — " +
-           "иначе ресурс EEPROM привода исчерпается за десятки минут работы.");
+  if (S.info.torque_limit_applied === false && !S.info.simulated) {
+    banner("Предел момента в приводах НЕ выставлен: номер параметра не найден в профиле. " +
+           "Пока это так, трос защищён только софтом, а мотор способен его порвать.");
   }
 }
 
@@ -734,77 +735,76 @@ setInterval(async () => {
 }, 500);
 
 // --------------------------------------------------------------------------
-//  Привязка: геометрия модулей и калибровка лебёдок
+//  Привязка: ручное вращение барабанов и хоминг по углам
 // --------------------------------------------------------------------------
-const PAIR_LABELS = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
 
 function moduleName(i) {
   return (S.info && S.info.anchor_ids && S.info.anchor_ids[i]) || `M${i + 1}`;
 }
 
-function buildGeometryInputs() {
-  const dist = $("geo-distances");
-  if (dist.children.length) return;
-  dist.innerHTML = PAIR_LABELS.map(([a, b], i) =>
-    `<label>${moduleName(a)} — ${moduleName(b)}
-       <input type="number" step="1" data-geo-d="${i}" placeholder="мм"></label>`).join("");
+// --------------------------------------------------------------------------
+//  Ручное вращение барабанов — работает без всякой привязки
+// --------------------------------------------------------------------------
+function buildCableJog() {
+  const box = $("cable-jog");
+  if (box.children.length) return;
   const n = (S.info && S.info.n_cables) || 4;
-  $("geo-heights").innerHTML = Array.from({ length: n }, (_, i) =>
-    `<label>высота ${moduleName(i)} над полом
-       <input type="number" step="1" data-geo-h="${i}" placeholder="мм"></label>`).join("");
-  $("homing-inputs").innerHTML = Array.from({ length: n }, (_, i) =>
-    `<label>${moduleName(i)} → платформа
-       <input type="number" step="1" data-homing="${i}" placeholder="мм"></label>`).join("");
+  box.innerHTML = Array.from({ length: n }, (_, i) =>
+    `<div class="row">
+       <span class="cable-name">${moduleName(i)}</span>
+       <button data-cable-in="${i}">выбрать</button>
+       <button data-cable-out="${i}">стравить</button>
+     </div>`).join("");
+
+  const feed = () => Math.abs(parseFloat($("cable-feed").value) || 15);
+  // Держим кнопку — крутится, отпустили — стоит. Так безопаснее: рука
+  // соскользнула, и барабан встал сам.
+  const bind = (selector, sign) => {
+    box.querySelectorAll(selector).forEach((btn) => {
+      const index = Number(btn.dataset.cableIn ?? btn.dataset.cableOut);
+      const run = (speed) => api("/api/cable/speed", "POST",
+                                 { index, speed_mms: speed }).catch(() => {});
+      btn.onpointerdown = (e) => { btn.setPointerCapture(e.pointerId); run(sign * feed()); };
+      btn.onpointerup = () => run(0);
+      btn.onpointercancel = () => run(0);
+      btn.onpointerleave = () => run(0);
+    });
+  };
+  bind("[data-cable-in]", +1);
+  bind("[data-cable-out]", -1);
 }
 
-function readGeometry() {
-  const distances = [...document.querySelectorAll("[data-geo-d]")].map((el) => parseFloat(el.value));
-  const heights = [...document.querySelectorAll("[data-geo-h]")].map((el) => parseFloat(el.value));
-  if (distances.some(Number.isNaN) || heights.some(Number.isNaN)) return null;
-  return { distances_mm: distances, heights_mm: heights };
-}
+$("cable-stop").onclick = async () => {
+  await api("/api/cable/stop", "POST");
+  logLine("тросы остановлены");
+};
 
-async function fitGeometry(apply) {
-  const data = readGeometry();
-  if (!data) { logLine("заполните все шесть расстояний и все высоты"); return; }
-  try {
-    const result = await api("/api/geometry/fit", "POST", { ...data, apply });
-    const parts = [result.summary];
-    if (result.warnings && result.warnings.length) parts.push("", ...result.warnings);
-    if (result.applied) parts.push("", result.note);
-    $("geo-report").textContent = parts.join(String.fromCharCode(10));
-    logLine(`геометрия: расхождение ${result.residual_rms_mm} мм`);
-  } catch (e) {
-    $("geo-report").textContent = "Не принято: " + e.message;
-  }
+// --------------------------------------------------------------------------
+//  Хоминг по углам
+// --------------------------------------------------------------------------
+function readCorners() {
+  const raw = ($("homing-corners").value || "").split(",");
+  const out = raw.map((v) => parseInt(v.trim(), 10)).filter((v) => Number.isInteger(v));
+  return out.length ? out : null;
 }
-$("geo-fit").onclick = () => fitGeometry(false);
-$("geo-apply").onclick = () => fitGeometry(true);
 
 $("homing-start").onclick = async () => {
-  const step = parseFloat($("homing-step").value) || 400;
-  const result = await api("/api/homing/start", "POST", { step_mm: step });
-  logLine(`объезд запущен: ${result.stations} стоянки. ${result.note}`);
+  try {
+    const result = await api("/api/homing/start", "POST", { corners: readCorners() });
+    logLine(`хоминг запущен: углы ${result.corners.join(", ")}. ${result.note}`);
+  } catch (e) {
+    logLine("хоминг не запустился: " + e.message);
+  }
 };
+
 $("homing-abort").onclick = async () => {
   await api("/api/homing/abort", "POST");
-  logLine("объезд прерван");
-};
-$("homing-confirm").onclick = async () => {
-  const values = [...document.querySelectorAll("[data-homing]")].map((el) => parseFloat(el.value));
-  if (values.some(Number.isNaN)) { logLine("введите все замеры до платформы"); return; }
-  try {
-    const result = await api("/api/homing/confirm", "POST", { distances_mm: values });
-    logLine(`стоянка записана (${result.label}), всего ${result.stations}`);
-    document.querySelectorAll("[data-homing]").forEach((el) => { el.value = ""; });
-  } catch (e) {
-    logLine("не записано: " + e.message);
-  }
+  logLine("хоминг прерван");
 };
 
 async function solveHoming(apply) {
   try {
-    const result = await api("/api/homing/solve", "POST", { fit_elasticity: true, apply });
+    const result = await api("/api/homing/solve", "POST", { apply });
     const parts = [result.summary];
     if (result.warnings && result.warnings.length) parts.push("", ...result.warnings);
     parts.push("", result.applied ? result.note : "(не сохранено)");
@@ -819,15 +819,13 @@ $("homing-apply").onclick = () => solveHoming(true);
 
 setInterval(async () => {
   if (!$("tab-calib").classList.contains("active")) return;
-  buildGeometryInputs();
+  buildCableJog();
   try {
     const st = await api("/api/homing/status");
     $("homing-bar").style.width = ((st.progress || 0) * 100).toFixed(1) + "%";
-    $("homing-inputs").classList.toggle("hidden", !st.waiting);
-    $("homing-confirm").disabled = !st.waiting;
     $("homing-phase").textContent = st.running
-      ? `стоянка ${Math.min(st.index + 1, st.total)} из ${st.total} — ${st.label} (${st.phase})`
-      : (st.stations ? `объезд закончен, снято стоянок: ${st.stations}` : "не запущено");
+      ? `угол ${st.corner} (${st.index + 1} из ${st.total}) — ${st.phase}`
+      : (st.recorded ? `хоминг закончен, углов пройдено: ${st.recorded}` : "не запущено");
   } catch { /* не критично */ }
 }, 700);
 

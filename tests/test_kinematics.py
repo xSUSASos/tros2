@@ -14,9 +14,29 @@ def kin(machine):
 
 
 @pytest.fixture
-def centre(kin):
+def centre(machine, kin):
+    """Центр рамы в рабочей плоскости — там, где машина и работает."""
     c = kin.anchors.mean(axis=0)
-    return np.array([c[0], c[1], 1000.0])
+    z = machine.geometry.plane_z_mm
+    if z is None:
+        z = 0.5 * (machine.workspace.z_min_mm + machine.workspace.z_max_mm)
+    return np.array([c[0], c[1], float(z)])
+
+
+@pytest.fixture
+def plane_z(machine):
+    z = machine.geometry.plane_z_mm
+    return float(z if z is not None else machine.workspace.z_min_mm)
+
+
+def _uniform_tension(kin, pose, machine) -> float:
+    """Натяжение решения, в котором все тросы натянуты одинаково.
+
+    Это и есть НАИБОЛЬШЕЕ достижимое натяжение самого слабого троса: любое
+    отклонение по нуль-пространству два троса поднимает, а два опускает.
+    """
+    unit = kin.unit_vectors(pose)
+    return float(machine.platform.mass_kg * T.GRAVITY / unit[:, 2].sum())
 
 
 # --------------------------------------------------------------------------- #
@@ -27,9 +47,9 @@ def test_symmetric_pose_gives_equal_lengths(kin, centre):
     assert np.allclose(lengths, lengths[0])
 
 
-def test_forward_inverse_roundtrip(kin):
-    for pose in ([3000, 2500, 1000], [1500, 1200, 1800], [4500, 3800, 700]):
-        pose = np.array(pose, dtype=float)
+def test_forward_inverse_roundtrip(kin, plane_z):
+    for xy in ([1200, 700], [2600, 1100], [1990, 960]):
+        pose = np.array([xy[0], xy[1], plane_z], dtype=float)
         recovered, rms = kin.forward(kin.inverse(pose), guess=pose + 250)
         assert np.allclose(recovered, pose, atol=1e-6)
         assert rms < 1e-6
@@ -72,11 +92,16 @@ def test_moving_toward_anchor_winds_that_cable_in(kin, centre):
     assert rates[1] > max(rates[0], rates[2], rates[3])
 
 
-def test_condition_number_degrades_near_anchor_plane(kin):
-    """У плоскости якорей тросы становятся горизонтальными и держать вес нечем."""
-    low = kin.condition_number(np.array([3000.0, 2500.0, 500.0]))
-    high = kin.condition_number(np.array([3000.0, 2500.0, 2900.0]))
-    assert high > low * 5
+def test_condition_number_degrades_near_anchor_plane(kin, machine, centre):
+    """У плоскости якорей тросы становятся горизонтальными и держать вес нечем.
+
+    Отсюда и требование к провису: подвесить коробку почти вплотную к
+    плоскости модулей — значит потребовать натяжений, которых трос не выдержит.
+    """
+    working = kin.condition_number(centre)
+    near_plane = centre.copy()
+    near_plane[2] = machine.geometry.anchor_z_mm - 5.0
+    assert kin.condition_number(near_plane) > working * 5
 
 
 def test_platform_at_anchor_is_rejected(kin):
@@ -121,11 +146,16 @@ def test_all_tensions_within_limits(kin, machine, centre):
 
 
 def test_symmetric_pose_gives_symmetric_tensions(kin, machine, centre):
+    """В центре прямоугольника все четыре троса одинаковой длины, поэтому
+    решение обязано быть симметричным относительно диагоналей. Свободна ровно
+    одна комбинация — перетяжка диагональных пар, — и именно по ней решение и
+    расходится, если целевое натяжение ниже равновесного."""
     W = kin.structure_matrix(centre)
     forces = T.distribute(W, T.gravity_wrench(machine.platform.mass_kg),
                           f_min=machine.tension.min_n, f_max=machine.tension.max_n,
                           f_target=machine.tension.target_n).forces
-    assert np.allclose(forces, forces[0], atol=1e-6)
+    assert forces[0] == pytest.approx(forces[2], abs=1e-6)
+    assert forces[1] == pytest.approx(forces[3], abs=1e-6)
 
 
 def test_uniform_preload_is_not_a_free_parameter(kin, centre):
@@ -146,20 +176,26 @@ def test_target_tension_sets_the_weakest_cable(kin, machine, centre):
     рискует провиснуть, и именно его имеет смысл держать подальше от нуля."""
     W = kin.structure_matrix(centre)
     w = T.gravity_wrench(machine.platform.mass_kg)
-    result = T.distribute(W, w, f_min=8.0, f_max=120.0, f_target=15.0)
-    assert result.min_force == pytest.approx(15.0, abs=1e-3)
+    uniform = _uniform_tension(kin, centre, machine)
+    modest = 0.5 * uniform
+    result = T.distribute(W, w, f_min=0.5 * modest, f_max=1e4, f_target=modest)
+    assert result.min_force == pytest.approx(modest, abs=1e-3)
     assert np.allclose(W @ result.forces + w, 0.0, atol=1e-8)
 
 
-def test_unreachable_target_is_reported_honestly(kin, machine, centre):
-    """Если геометрия не даёт поднять слабый трос до цели, система должна
-    сказать об этом, а не молча выдать другое значение."""
+def test_target_above_equilibrium_cannot_be_reached(kin, machine, centre):
+    """Ползунок натяжения не всесилен, и это не баг, а физика. Свободна ровно
+    одна комбинация — перетяжка диагональных пар: она ДВА троса поднимает и
+    ДВА опускает. Значит поднять самый слабый выше равновесного уровня нельзя
+    вовсе, и лучшее, что бывает, — равномерное решение. Общий уровень
+    натяжения выбирается провисом, а не алгоритмом."""
     W = kin.structure_matrix(centre)
     w = T.gravity_wrench(machine.platform.mass_kg)
-    result = T.distribute(W, w, f_min=8.0, f_max=120.0, f_target=100.0)
-    assert result.feasible
-    assert "предел геометрии" in result.message
-    assert result.min_force < 100.0
+    uniform = _uniform_tension(kin, centre, machine)
+    greedy = T.distribute(W, w, f_min=1.0, f_max=1e4, f_target=10.0 * uniform)
+    assert greedy.feasible
+    assert greedy.min_force <= uniform + 1e-6
+    assert greedy.min_force == pytest.approx(uniform, rel=0.05)
 
 
 def test_distribution_is_fast_enough_for_the_control_loop(kin, machine, centre):
@@ -176,36 +212,44 @@ def test_distribution_is_fast_enough_for_the_control_loop(kin, machine, centre):
     assert per_call_ms < 2.0, f"{per_call_ms:.2f} мс на расчёт — слишком долго"
 
 
-def test_near_edge_solution_still_balances(kin, machine):
+def test_near_edge_solution_still_balances(kin, machine, plane_z):
     """У края рабочей зоны цель недостижима, но равновесие обязано сойтись
     и все тросы остаться в пределах."""
-    pose = np.array([900.0, 800.0, 1000.0])
+    low = kin.anchors.min(axis=0)
+    pose = np.array([low[0] + 700.0, low[1] + 500.0, plane_z])
     W = kin.structure_matrix(pose)
     w = T.gravity_wrench(machine.platform.mass_kg)
-    result = T.distribute(W, w, f_min=8.0, f_max=120.0, f_target=60.0)
+    limits = machine.tension
+    result = T.distribute(W, w, f_min=limits.min_n, f_max=limits.max_n,
+                          f_target=limits.max_n)
     assert result.feasible
     assert np.allclose(W @ result.forces + w, 0, atol=1e-8)
-    assert result.min_force >= 8.0 - 1e-6
-    assert result.max_force <= 120.0 + 1e-6
+    assert result.min_force >= limits.min_n - 1e-6
+    assert result.max_force <= limits.max_n + 1e-6
 
 
-def test_anchor_plane_is_unreachable(kin, machine):
-    """У плоскости якорей вертикальной составляющей нет, вес держать нечем —
-    это физика, а не настройка."""
-    pose = np.array([3000.0, 2500.0, 2950.0])
+def test_anchor_plane_is_unreachable(kin, machine, centre):
+    """У самой плоскости якорей вертикальной составляющей нет, вес держать
+    нечем — это физика, а не настройка. Отсюда и нижняя граница на провис."""
+    pose = centre.copy()
+    pose[2] = machine.geometry.anchor_z_mm - 0.5
     W = kin.structure_matrix(pose)
     w = T.gravity_wrench(machine.platform.mass_kg)
-    assert not T.wrench_feasible(W, w, f_min=8.0, f_max=120.0)
-    result = T.distribute(W, w, f_min=8.0, f_max=120.0, f_target=30.0)
+    limits = machine.tension
+    assert not T.wrench_feasible(W, w, f_min=limits.min_n, f_max=limits.max_n)
+    result = T.distribute(W, w, f_min=limits.min_n, f_max=limits.max_n,
+                          f_target=limits.target_n)
     assert not result.feasible
 
 
-def test_capacity_margin_is_highest_at_centre(kin, machine):
+def test_capacity_margin_is_highest_at_centre(kin, machine, centre, plane_z):
     w = T.gravity_wrench(machine.platform.mass_kg)
     kw = dict(f_min=machine.tension.min_n, f_max=machine.tension.max_n)
-    centre = T.capacity_margin(kin.structure_matrix(np.array([3000., 2500., 1000.])), w, **kw)
-    edge = T.capacity_margin(kin.structure_matrix(np.array([800., 2500., 1000.])), w, **kw)
-    assert centre > edge * 3
+    low = kin.anchors.min(axis=0)
+    edge_pose = np.array([low[0] + 350.0, centre[1], plane_z])
+    middle = T.capacity_margin(kin.structure_matrix(centre), w, **kw)
+    edge = T.capacity_margin(kin.structure_matrix(edge_pose), w, **kw)
+    assert middle > edge * 3
 
 
 def test_external_wrench_recovered_from_forces(kin, machine, centre):

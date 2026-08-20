@@ -7,7 +7,13 @@
 
     P-004 = 1   скоростной режим
     P-025 = 1   уставка берётся из P-137, а не с аналогового входа
+    P-098 = 1   servo-on принудительно, без внешнего входа
+    P-069/070   предел момента — единственная защита, не зависящая от софта
     P-137       пишется каждый цикл, читаются d-PoS, d-trq, d-Err
+
+Разрешения приводов по Modbus здесь нет и не предполагается: питание снимает
+физическая кнопка. Абсолютный энкодер переживает выключение, поэтому после
+обратного включения отсчёты остаются верными и привязка не теряется.
 
 Все адреса берутся из профиля (config/drive_t3d.yaml). Если профиль ещё не
 заполнен разведкой, драйвер отказывается работать с железом — молча гонять
@@ -30,13 +36,23 @@ from drives.base import (
     Transport,
     TransportError,
 )
-from drives.enable import EnableBackend
 from drives.modbus_rtu import decode, encode
 
 log = logging.getLogger(__name__)
 
-#: что читается каждый цикл управления
-CYCLE_MONITORS = ("actual_position", "actual_torque", "actual_speed", "alarm_code")
+#: Что читается КАЖДЫЙ цикл управления.
+#
+#  Набор выбран так, чтобы уложиться в две транзакции на ось: момент лежит
+#  отдельным регистром (0x09), а код аварии и позиция — одним куском
+#  (0x1A..0x20). На четырёх осях это восемь чтений и четыре записи за цикл, и
+#  именно это число, а не желание, определяет достижимую частоту.
+CYCLE_MONITORS = ("actual_position", "actual_torque", "alarm_code")
+
+#: Фактическая скорость нужна для диагностики «команду дали, а вал стоит» —
+#  самого коварного отказа, потому что выглядит он как «просто не едет». Но
+#  каждый цикл её читать расточительно, поэтому оси опрашиваются по очереди:
+#  одна лишняя транзакция на цикл вместо четырёх.
+SPEED_MONITOR = "actual_speed"
 
 
 # --------------------------------------------------------------------------- #
@@ -120,19 +136,28 @@ class T3DAxis:
                         self.profile.addressing.word_order,
                     )
         except TransportError as exc:
-            self.state = DriveState(axis=self.index, online=False, error=str(exc),
-                                    enabled=self.state.enabled)
+            # Отсчёт сохраняем прежний, а не обнуляем: одна потерянная посылка
+            # не должна выглядеть как прыжок платформы через всю раму. Признак
+            # беды — online=False, по нему защиты и сработают.
+            self.state = DriveState(
+                axis=self.index, online=False, error=str(exc),
+                position_counts=self.state.position_counts,
+                torque_percent=self.state.torque_percent,
+                enabled=self.state.enabled,
+            )
             return self.state
 
         pos_spec = self.profile.monitor("actual_position")
         trq_spec = self.profile.monitor("actual_torque")
-        spd_spec = self.profile.monitor("actual_speed")
         self.state = DriveState(
             axis=self.index,
             online=True,
             position_counts=int(raw.get("actual_position", 0) * pos_spec.scale),
             torque_percent=raw.get("actual_torque", 0) * trq_spec.scale,
-            speed_rpm=raw.get("actual_speed", 0) * spd_spec.scale,
+            # Скорость читается по кругу отдельным опросом, поэтому здесь
+            # переносим прошлое значение, а не подставляем ноль: иначе панель
+            # показывала бы «стоит» на трёх осях из четырёх.
+            speed_rpm=self.state.speed_rpm,
             alarm=int(raw.get("alarm_code", 0)),
             enabled=self.state.enabled,
             stamp=time.perf_counter(),
@@ -183,13 +208,12 @@ class T3DDriveGroup(DriveGroup):
     """Все лебёдки машины. Порядок осей совпадает с порядком якорей в конфиге."""
 
     def __init__(self, machine: MachineConfig, profile: DriveProfile,
-                 transports: dict[str, Transport], enable_backend: EnableBackend,
-                 *, simulated: bool = False) -> None:
+                 transports: dict[str, Transport], *, simulated: bool = False) -> None:
         self.machine = machine
         self.profile = profile
         self.transports = transports
-        self.enabler = enable_backend
         self.simulated = simulated
+        self.torque_limit_applied = False
 
         if not simulated:
             self._check_ready_for_hardware()
@@ -205,6 +229,7 @@ class T3DDriveGroup(DriveGroup):
             self.axes.append(
                 T3DAxis(i, anchor.id, transports[anchor.bus], anchor.slave, profile, spans)
             )
+        self._speed_turn = 0
         self._hot_address = profile.param_address(
             profile.hot_register, ram=profile.addressing.param_ram_base is not None
         )
@@ -215,17 +240,18 @@ class T3DDriveGroup(DriveGroup):
         if not self.profile.is_discovered:
             raise ConfigError(
                 f"профиль {self.profile.name!r} не заполнен: адреса регистров неизвестны.\n"
-                f"Снимите карту: python tools/reg_probe.py --port <порт> --slave 1 --apply"
+                f"Для T3D обычно достаточно param_base: 0 и monitor_base: 0 — так задано\n"
+                f"мануалом V3.3 (адрес FC03 равен номеру параметра).\n"
+                f"Если привод отвечает иначе, снимите карту:\n"
+                f"  python tools/reg_probe.py --port <порт> --slave 1 --apply"
             )
-        if self.machine.safety.require_eeprom_check and self.profile.eeprom_safe is not True:
+        if self.profile.eeprom_safe is False:
             raise ConfigError(
-                f"не проверено, что уставку скорости можно писать часто "
-                f"(eeprom_safe = {self.profile.eeprom_safe}).\n"
-                f"Цикл на {self.machine.control.loop_hz:.0f} Гц исчерпает ресурс EEPROM "
-                f"примерно за {100_000 / self.machine.control.loop_hz / 60:.0f} минут "
-                f"и выведет привод из строя.\n"
-                f"Запустите: python tools/reg_probe.py --port <порт> --slave 1 --apply\n"
-                f"Осознанно обойти: safety.require_eeprom_check = false в machine.yaml"
+                f"профиль {self.profile.name!r} помечен eeprom_safe: false — уставка "
+                f"скорости ложится в EEPROM.\nЦикл на "
+                f"{self.machine.control.loop_hz:.0f} Гц исчерпает его ресурс примерно за "
+                f"{100_000 / self.machine.control.loop_hz / 60:.0f} минут.\n"
+                f"Нужен диапазон-зеркало без записи в EEPROM (addressing.param_ram_base)."
             )
 
     # ------------------------------------------------------------------ #
@@ -258,6 +284,9 @@ class T3DDriveGroup(DriveGroup):
                     ) from exc
             log.info("ось %d (%s): режим задан", axis.index, axis.anchor)
         self._verify_mode()
+        # Предел момента ставится сразу и больше не трогается. Это
+        # единственная защита, работающая независимо от цикла управления.
+        self.set_torque_limit(self.machine.safety.drive_torque_limit_percent)
 
     def _verify_mode(self) -> None:
         """Проверяет, что привод действительно в скоростном режиме.
@@ -280,16 +309,37 @@ class T3DDriveGroup(DriveGroup):
                 )
 
     # ------------------------------------------------------------------ #
-    def enable(self, on: bool) -> None:
-        if not on:
-            self.stop()  # сперва обнуляем уставки, потом снимаем разрешение
-        self.enabler.set(on)
-        for axis in self.axes:
-            axis.state.enabled = on
-            axis.dither.reset()
-
     def read_states(self) -> list[DriveState]:
-        return [axis.read_state() for axis in self.axes]
+        states = [axis.read_state() for axis in self.axes]
+        self._poll_one_speed(states)
+        return states
+
+    def _poll_one_speed(self, states: list[DriveState]) -> None:
+        """Читает фактическую скорость у одной оси за цикл, по кругу.
+
+        Остальные оси показывают прошлое значение — для диагностики этого
+        достаточно, а шина не нагружается лишними тремя транзакциями.
+        """
+        if not self.axes:
+            return
+        index = self._speed_turn % len(self.axes)
+        self._speed_turn += 1
+        axis = self.axes[index]
+        if not states[index].online:
+            return
+        try:
+            spec = self.profile.monitor(SPEED_MONITOR)
+            regs = axis.transport.read_registers(
+                axis.slave, self.profile.monitor_address(SPEED_MONITOR), spec.words,
+                function=self.profile.monitor_function_code(),
+            )
+            value = decode(regs, spec.type, self.profile.addressing.word_order)
+            states[index].speed_rpm = value * spec.scale
+            axis.state.speed_rpm = states[index].speed_rpm
+        except TransportError as exc:
+            log.debug("ось %d: скорость не прочиталась (%s)", index, exc)
+        else:
+            pass
 
     def set_speeds(self, rpm: Sequence[float]) -> None:
         if len(rpm) != self.n_axes:
@@ -340,11 +390,16 @@ class T3DDriveGroup(DriveGroup):
                 "только софтом. Мотор способен выдать %.0f Н на тросе.",
                 self.machine.ordered_winches()[0].torque_percent_to_force(100.0),
             )
+            self.torque_limit_applied = False
             return False
         for axis in self.axes:
             axis.write_param("torque_limit_fwd", int(percent))
             if "torque_limit_rev" in self.profile.params:
                 axis.write_param("torque_limit_rev", int(percent))
+        self.torque_limit_applied = True
+        winch = self.machine.ordered_winches()[0]
+        log.info("предел момента в приводах: %.0f %% = %.1f Н на тросе",
+                 percent, winch.torque_percent_to_force(percent))
         return True
 
     def stats(self) -> dict[str, Any]:
@@ -354,7 +409,8 @@ class T3DDriveGroup(DriveGroup):
         lines = [
             f"{'симулятор' if self.simulated else 'железо'}: {self.n_axes} осей, "
             f"профиль {self.profile.name!r}",
-            f"разрешение приводов: {self.enabler.describe()}",
+            f"предел момента в приводах: "
+            f"{'выставлен' if self.torque_limit_applied else 'НЕ ВЫСТАВЛЕН, параметр не найден'}",
         ]
         for axis in self.axes:
             lines.append(
@@ -379,7 +435,6 @@ def build_drive_group(
     Единственное место, где решается «железо или модель». Всё выше по стеку
     работает с DriveGroup и разницы не видит.
     """
-    from drives.enable import make_enable_backend
     from drives.modbus_rtu import ModbusRtuTransport
     from drives.sim import SimTransport
 
@@ -411,11 +466,4 @@ def build_drive_group(
     if not transports:
         raise ConfigError("ни одна шина не используется — проверьте bus у якорей")
 
-    kind = "sim" if simulated else machine.safety.enable_backend
-    enabler = make_enable_backend(
-        kind,
-        pin=machine.safety.enable_gpio_pin,
-        transports=transports,
-        slaves_by_transport=slaves_by_bus,
-    )
-    return T3DDriveGroup(machine, effective_profile, transports, enabler, simulated=simulated)
+    return T3DDriveGroup(machine, effective_profile, transports, simulated=simulated)

@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 
-from cdpr.config import DriveProfile
+from cdpr.config import ConfigError, DriveProfile
 from drives.base import BusTimeout, CrcError, ModbusException, Transport, TransportError
 
 log = logging.getLogger(__name__)
@@ -95,10 +95,21 @@ class SimAxis:
         self.target_rpm: float = 0.0
         self.torque_percent: float = 0.0
         self.alarm: int = 0
-        self.enabled: bool = False
+        self.enabled: bool = True   # приводы включены всегда: P-098 = 1
 
         # разгон как у привода: P-060 — мс на 1000 об/мин
         self.accel_time_ms: float = 30.0
+        # Предел момента (P-069/P-070). Дойдя до него, привод перестаёт
+        # разгоняться и встаёт — это и есть упор. Без этого модель позволяла
+        # бы наматывать трос бесконечно, и хоминг вёл бы себя не так, как на
+        # железе, ровно в том месте, где ошибка стоит дороже всего.
+        self.torque_limit_percent: float = 300.0
+        # В какую сторону привод упёрся. Знак момента в модели считается от
+        # натяжения и о направлении вращения ничего не говорит, поэтому
+        # запоминаем именно сторону движения — и держим её, пока нагрузка не
+        # спадёт. Без этой памяти привод дёргался бы на пороге: встал, момент
+        # упал, поехал, момент вырос, встал.
+        self._stalled_sign: float = 0.0
         self.params: dict[int, int] = {}
         self._t = clock()
 
@@ -113,6 +124,18 @@ class SimAxis:
 
         target = self.target_rpm if self.enabled and not self.alarm else 0.0
         target = max(-self.max_rpm, min(self.max_rpm, target))
+
+        # Привод не может выдать больше своего предела момента. Дойдя до
+        # него, он перестаёт тянуть в ту сторону, куда упёрся, но свободно
+        # уходит обратно.
+        load = abs(self.torque_percent)
+        if load >= self.torque_limit_percent and self._stalled_sign == 0.0:
+            moving = self.speed_rpm if self.speed_rpm else target
+            self._stalled_sign = 1.0 if moving > 0 else (-1.0 if moving < 0 else 0.0)
+        elif load < 0.9 * self.torque_limit_percent:
+            self._stalled_sign = 0.0
+        if self._stalled_sign and target * self._stalled_sign > 0:
+            target = 0.0
 
         rate = 1000.0 / max(self.accel_time_ms, 1.0) * 1000.0  # об/мин в секунду
         delta = target - self.speed_rpm
@@ -183,15 +206,36 @@ class SimTransport(Transport):
         for i, ax in enumerate(self.axes.values()):
             ax.position_counts = float(self._rng.randint(0, counts_per_rev) + i * 1000)
 
+        # Адрес мог прийти либо явным полем address, либо базой + номером
+        # параметра / order — считаем его так же, как считает сам профиль,
+        # иначе симулятор и настоящий драйвер разойдутся в том, что лежит
+        # по какому адресу (P-xxx с известным param_base, но без явного
+        # address, иначе был бы виден как "несуществующий регистр").
         self._addr_param: dict[int, str] = {}
         self._addr_monitor: dict[int, tuple[str, int]] = {}
         for pname, spec in self.profile.params.items():
-            if spec.address is not None:
-                self._addr_param[spec.address] = pname
+            try:
+                address = self.profile.param_address(pname)
+            except ConfigError:
+                continue
+            self._addr_param[address] = pname
         for mname, spec in self.profile.monitors.items():
-            if spec.address is not None:
-                for w in range(spec.words):
-                    self._addr_monitor[spec.address + w] = (mname, w)
+            try:
+                address = self.profile.monitor_address(mname)
+            except ConfigError:
+                continue
+            for w in range(spec.words):
+                self._addr_monitor[address + w] = (mname, w)
+
+        # У настоящего привода статусные регистры лежат сплошным блоком
+        # (у T3D это 0x0000..0x002D), и чтение любого адреса внутри блока
+        # проходит, даже если величина нам неинтересна. Без этого драйвер не
+        # смог бы объединять соседние величины в одну транзакцию, а на четырёх
+        # осях именно объединение и определяет частоту цикла.
+        if self._addr_monitor:
+            self._monitor_span = (min(self._addr_monitor), max(self._addr_monitor))
+        else:
+            self._monitor_span = (0, -1)
 
         # Параметры связи должны отражать то, как мы на самом деле подключены —
         # именно на этом совпадении держится восстановление карты регистров
@@ -212,9 +256,13 @@ class SimTransport(Transport):
                 "speed_source": prof.encode_value("speed_source", "analog"),
             }
             for pname, value in preset.items():
-                spec = prof.params.get(pname)
-                if spec is not None and spec.address is not None:
-                    ax.params[spec.address] = int(value) & 0xFFFF
+                if pname not in prof.params:
+                    continue
+                try:
+                    address = prof.param_address(pname)
+                except ConfigError:
+                    continue
+                ax.params[address] = int(value) & 0xFFFF
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
@@ -307,14 +355,29 @@ class SimTransport(Transport):
         with self._lock:
             ax = self._simulate_link(slave)
             self._tick()
+            # Мониторы и параметры обычно живут в разных диапазонах регистров
+            # Modbus (input FC04 и holding FC03) и не делят адреса — но
+            # у профиля без подтверждённой карты (репетиция разведки) обе
+            # таблицы намеренно совпадают по адресам и function, поэтому
+            # function решает только когда адрес занят в ОБЕИХ таблицах
+            # сразу; иначе смотрим туда, где адрес реально есть.
+            is_monitor_function = function == self.profile.monitor_function_code()
             out: list[int] = []
             for a in range(address, address + count):
-                if a in self._addr_monitor:
+                in_monitor = a in self._addr_monitor
+                in_param = a in self._addr_param
+                if in_monitor and in_param:
+                    use_monitor = is_monitor_function
+                else:
+                    use_monitor = in_monitor
+                if use_monitor:
                     name, word = self._addr_monitor[a]
                     spec = self.profile.monitors[name]
                     out.append(self._split(self._monitor_raw(ax, name), spec.words)[word])
-                elif a in self._addr_param:
+                elif in_param:
                     out.append(ax.params.get(a, self._param_default(a)) & 0xFFFF)
+                elif is_monitor_function and self._monitor_span[0] <= a <= self._monitor_span[1]:
+                    out.append(0)   # регистр внутри блока, но нам неинтересен
                 else:
                     self.stats.exceptions += 1
                     raise ModbusException(slave, function, 2)
@@ -356,12 +419,14 @@ class SimTransport(Transport):
             ax.target_rpm = float(signed)
         elif name == "accel_time":
             ax.accel_time_ms = max(1.0, float(raw))
+        elif name in ("torque_limit_fwd", "torque_limit_rev"):
+            ax.torque_limit_percent = float(abs(signed) or 300)
 
     # ------------------------------------------------------------------ #
     #  Управление моделью (не часть протокола)
     # ------------------------------------------------------------------ #
     def set_enabled(self, slave: int, on: bool) -> None:
-        """Разрешение привода приходит физическим входом SON, а не по Modbus,
+        """Обесточивание привода. На машине это делает физическая кнопка,
         поэтому в симуляторе это отдельный метод, а не запись регистра."""
         ax = self.axes.get(slave)
         if ax is not None:

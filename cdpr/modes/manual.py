@@ -18,17 +18,30 @@ class MdiMode(Mode):
 
     name = ModeName.MDI
 
-    def __init__(self, target_mm, feed_mms: float | None = None, tolerance_mm: float = 2.0) -> None:
+    def __init__(self, target_mm, feed_mms: float | None = None, tolerance_mm: float = 5.0,
+                 settle_s: float = 0.4) -> None:
         self.target = np.asarray(target_mm, dtype=float)
         self.feed = feed_mms
         self.tolerance = tolerance_mm
+        # Одного попадания в допуск мало: в этот момент платформа ещё движется,
+        # и если тут же отпустить цель, она проедет дальше. Ждём, пока
+        # успокоится, и только потом отдаём управление.
+        self.settle_s = settle_s
+        self._inside_s = 0.0
+
+    def enter(self, ctx) -> None:  # noqa: ANN001
+        self._inside_s = 0.0
 
     def update(self, ctx, dt: float) -> ModeOutput:  # noqa: ANN001
         pose = ctx.state.pose_mm
         if pose is None:
-            return ModeOutput.idle("положение неизвестно — нужна калибровка")
+            return ModeOutput.idle("положение неизвестно — нужна привязка")
         distance = float(np.linalg.norm(self.target - pose))
         if distance <= self.tolerance:
+            self._inside_s += dt
+        else:
+            self._inside_s = 0.0
+        if self._inside_s >= self.settle_s:
             return ModeOutput(target_pose=self.target, feed_mms=self.feed, done=True,
                               message=f"пришли, расхождение {distance:.1f} мм")
         return ModeOutput(target_pose=self.target, feed_mms=self.feed)

@@ -17,6 +17,7 @@ class ModeName(str, Enum):
     HOMING = "homing"
     ADMITTANCE = "admittance"
     AUTOTENSION = "autotension"
+    CABLE = "cable"        # ручное вращение одного барабана, без всякой привязки
 
 
 class Health(str, Enum):
@@ -37,16 +38,19 @@ class MachineState:
     health: Health = Health.OK
     messages: list[str] = field(default_factory=list)
 
-    enabled: bool = False
+    enabled: bool = False   # программное разрешение движения (не SON)
     estop: bool = False
-    homed: bool = False
+    homed: bool = False     # привязка пройдена: отсчёты переводятся в длины
+    arrived: bool = False   # цель достигнута в пределах допуска
 
     # положение
     pose_mm: np.ndarray | None = None
     target_mm: np.ndarray | None = None
     fk_residual_mm: float = 0.0
 
-    # тросы
+    # тросы: свободная длина — что стравлено с барабана (меряет энкодер),
+    # lengths_mm — расстояние до платформы, то есть свободная плюс вытяжка
+    free_lengths_mm: np.ndarray | None = None
     lengths_mm: np.ndarray | None = None
     target_lengths_mm: np.ndarray | None = None
     tensions_n: np.ndarray | None = None
@@ -77,9 +81,11 @@ class MachineState:
             "enabled": self.enabled,
             "estop": self.estop,
             "homed": self.homed,
+            "arrived": self.arrived,
             "pose_mm": arr(self.pose_mm, 1),
             "target_mm": arr(self.target_mm, 1),
             "fk_residual_mm": round(self.fk_residual_mm, 3),
+            "free_lengths_mm": arr(self.free_lengths_mm, 1),
             "lengths_mm": arr(self.lengths_mm, 1),
             "target_lengths_mm": arr(self.target_lengths_mm, 1),
             "tensions_n": arr(self.tensions_n, 1),

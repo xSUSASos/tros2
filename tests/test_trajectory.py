@@ -15,8 +15,13 @@ def planner(machine):
     return TrajectoryPlanner(machine, CDPRKinematics.from_config(machine))
 
 
-def _square(z=1000.0, feed=250.0):
-    pts = [(2000, 1500, z), (4000, 1500, z), (4000, 3500, z), (2000, 3500, z), (2000, 1500, z)]
+#: Подача для проб: заведомо в пределах машины, иначе планировщик её
+#: обрежет и тест начнёт проверять не то, что задумано.
+FEED = 150.0
+
+
+def _square(z=350.0, feed=FEED):
+    pts = [(1000, 600, z), (2600, 600, z), (2600, 1300, z), (1000, 1300, z), (1000, 600, z)]
     return [Move(np.array(pts[i], float), np.array(pts[i + 1], float), feed, line=i + 1)
             for i in range(len(pts) - 1)]
 
@@ -24,17 +29,17 @@ def _square(z=1000.0, feed=250.0):
 # --------------------------------------------------------------------------- #
 def test_straight_line_keeps_full_speed_through_junction(planner):
     moves = [
-        Move(np.array([2000., 1500., 1000.]), np.array([3000., 1500., 1000.]), 250.0),
-        Move(np.array([3000., 1500., 1000.]), np.array([4000., 1500., 1000.]), 250.0),
+        Move(np.array([1200., 800., 350.]), np.array([2200., 800., 350.]), FEED),
+        Move(np.array([2200., 800., 350.]), np.array([3200., 800., 350.]), FEED),
     ]
     planned = planner.plan(moves)
-    assert planned[0].exit_mms == pytest.approx(250.0)
+    assert planned[0].exit_mms == pytest.approx(FEED)
 
 
 def test_reversal_requires_full_stop(planner):
     moves = [
-        Move(np.array([2000., 1500., 1000.]), np.array([3000., 1500., 1000.]), 250.0),
-        Move(np.array([3000., 1500., 1000.]), np.array([2000., 1500., 1000.]), 250.0),
+        Move(np.array([1200., 800., 350.]), np.array([2200., 800., 350.]), FEED),
+        Move(np.array([2200., 800., 350.]), np.array([1200., 800., 350.]), FEED),
     ]
     assert planner.plan(moves)[0].exit_mms == pytest.approx(0.0)
 
@@ -87,7 +92,7 @@ def test_speed_is_zero_at_both_ends(planner):
 
 
 def test_zero_length_moves_are_dropped(planner):
-    same = np.array([2000., 1500., 1000.])
+    same = np.array([1200., 800., 350.])
     planned = planner.plan([Move(same, same.copy(), 100.0)])
     assert planned == []
 

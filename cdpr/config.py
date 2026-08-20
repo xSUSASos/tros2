@@ -45,16 +45,40 @@ class AnchorCfg(BaseModel):
 
 
 class GeometryCfg(BaseModel):
+    """Расположение точек схода и рабочая плоскость.
+
+    Если задан `plane_z_mm`, машина считается ПЛОСКОЙ: платформа висит на
+    постоянном отдалении от плоскости якорей, управляются только X и Y, а Z
+    берётся из этой величины и никогда не задаётся командой. Провис
+    калибруется один раз и дальше живёт как константа.
+    """
+
     model_config = _STRICT
     dof: Literal[2, 3] = 3
     anchors: list[AnchorCfg] = Field(min_length=3)
+    plane_z_mm: float | None = None
+
+    @property
+    def is_planar(self) -> bool:
+        return self.plane_z_mm is not None
+
+    @property
+    def anchor_z_mm(self) -> float:
+        """Высота плоскости якорей (среднее, если они разошлись на пару мм)."""
+        return sum(a.pos[2] for a in self.anchors) / len(self.anchors)
+
+    @property
+    def sag_mm(self) -> float:
+        """Насколько платформа висит ниже плоскости якорей."""
+        if self.plane_z_mm is None:
+            raise ConfigError("рабочая плоскость не задана: geometry.plane_z_mm пуст")
+        return self.anchor_z_mm - self.plane_z_mm
 
 
 class PlatformCfg(BaseModel):
     model_config = _STRICT
     mass_kg: float = Field(gt=0)
     attachments: list[Vec3]
-    landing_height_mm: float = 0.0
 
     @property
     def weight_n(self) -> float:
@@ -67,12 +91,16 @@ class PlatformCfg(BaseModel):
 class WinchCfg(BaseModel):
     """Параметры одной лебёдки.
 
-    Про намотку. При многослойной укладке эффективный радиус барабана растёт
-    на диаметр лески за слой, поэтому «мм на импульс» — не константа: при
-    леске 0.5 мм на барабане D60 каждый слой добавляет 1.7 % к масштабу.
-    Поэтому калибруются не k и c, а два физических параметра — отсчёт
-    энкодера при пустом барабане и длина троса в этот момент, — из которых
-    длина считается точно на любом слое (см. cdpr/line.py).
+    Калибруются два числа: отсчёт энкодера в опорной точке и длина троса в
+    этот момент. Опорная точка — угол, в который платформа подтягивается при
+    хоминге; ни разматывать барабан до конца, ни знать, сколько на нём троса,
+    для этого не нужно.
+
+    Про намотку. Пока трос лежит в один слой, «мм на импульс» — константа, и
+    этих двух чисел достаточно. Многослойная укладка (winding: multi_layer)
+    меняет эффективный радиус на диаметр лески за слой; тогда длина считается
+    послойно, см. cdpr/line.py. При леске 0.3 мм и барабане ⌀60 в один слой
+    входит около 34 м троса, поэтому на этой машине слой всегда первый.
     """
 
     model_config = _STRICT
@@ -88,10 +116,10 @@ class WinchCfg(BaseModel):
     rated_torque_nm: float = Field(gt=0)
     direction: Literal[-1, 1] = 1
 
-    # --- заполняется калибровкой ---
-    count_empty: int | None = None
-    length_at_empty_mm: float | None = None
-    ea_n: float | None = None
+    # --- заполняется хомингом, руками не правится ---
+    count_ref: int | None = None          # отсчёт энкодера в опорной точке
+    length_at_ref_mm: float | None = None  # длина троса в этот момент, мм
+    ea_n: float | None = None              # продольная жёсткость троса, Н
 
     @property
     def drum_radius_mm(self) -> float:
@@ -123,7 +151,7 @@ class WinchCfg(BaseModel):
 
     @property
     def is_calibrated(self) -> bool:
-        return self.count_empty is not None and self.length_at_empty_mm is not None
+        return self.count_ref is not None and self.length_at_ref_mm is not None
 
     def force_to_torque_percent(self, force_n: float, radius_mm: float | None = None) -> float:
         """Натяжение троса (Н) -> момент мотора (% от номинала)."""
@@ -180,18 +208,84 @@ class MotionCfg(BaseModel):
 
 
 class ControlCfg(BaseModel):
+    """Настройки контура.
+
+    Слежение идёт по СВОБОДНЫМ длинам тросов — тем, что меряет энкодер.
+    Натяжение отдельным регулятором не правится: оно однозначно задано
+    геометрией. Общий уровень натяжения в такой машине выбирается не
+    алгоритмом, а высотой рабочей плоскости (geometry.plane_z_mm): чем больше
+    провис, тем меньше натяжение. Попытка «поднять натяжение во всех тросах»
+    вместо этого подняла бы платформу.
+
+    Роль, которую в жёстких системах играл бы преднатяг, здесь выполняет
+    поправка на вытяжку: трос под нагрузкой длиннее свободного, и стравить
+    надо ровно на эту разницу меньше.
+    """
+
     model_config = _STRICT
     loop_hz: float = Field(gt=0, le=1000)
     position_kp: float = Field(ge=0, description="1/с: скорость троса = kp * ошибка длины")
-    tension_kp: float = Field(ge=0, description="мм/с на Н")
-    # Ниже этой ошибки натяжение не правится: иначе приводы будут бесконечно
-    # дёргаться вокруг цели, изнашивая механику без всякой пользы.
+
+    # Ниже этой ошибки по длине трос не правится. Мёртвая зона нужна из-за
+    # шума измерения момента: он входит в поправку на вытяжку, и на мягком
+    # тросе один процент момента — это больше сантиметра кажущейся длины.
+    length_deadband_mm: float = Field(default=3.0, ge=0)
+    # Постоянная времени сглаживания натяжения для расчёта вытяжки.
+    tension_filter_s: float = Field(default=1.0, ge=0)
+    # Ниже этой ошибки натяжение считается достигнутым.
     tension_deadband_n: float = Field(default=1.5, ge=0)
+
+    # Допуск прибытия: ближе этого к цели контур считает, что приехали, и
+    # останавливается. Смысл в кванте уставки — при целых об/мин бесконечно
+    # уточнять положение бессмысленно, начнётся дребезг.
+    arrival_tolerance_mm: float = Field(default=5.0, gt=0)
+
     watchdog_ms: float = Field(gt=0)
 
     @property
     def dt(self) -> float:
         return 1.0 / self.loop_hz
+
+
+class HomingCfg(BaseModel):
+    """Привязка подтягиванием в углы.
+
+    Приращение длины троса известно точно и без всякой калибровки: сколько
+    импульсов намотал барабан, столько троса и выбрал. Неизвестно только
+    начало отсчёта. Угол даёт его: коробка подтягивается вплотную к модулю и
+    упирается — повторяемость тут механическая, а не программная.
+
+    Одного угла достаточно, чтобы запуститься. Остальные углы работают
+    ПРОВЕРКОЙ: по привязке из первого предсказываются отсчёты в остальных, и
+    расхождение сразу показывает, врут ли размеры рамы или масштаб «мм на
+    импульс». Заодно по ним подбирается жёсткость троса — в разных углах
+    натяжения разные, а это ровно то условие, при котором вытяжку видно.
+
+    Выводить стороны рамы из разности отсчётов не стоит, хотя соблазн есть:
+    чувствительность к отступу от модуля выходит двукратной, и рулетка даёт
+    точнее.
+    """
+
+    model_config = _STRICT
+    corners: list[int] = Field(default_factory=lambda: [0], min_length=1)
+    # Где встаёт центр коробки, упершись в модуль: горизонтальный отступ от
+    # якоря по диагонали внутрь рамы и высота. Обе величины меряются линейкой
+    # один раз. Ошибка в них сдвигает всю систему координат целиком, но
+    # движение не искажает — она входит во все длины одинаково.
+    corner_inset_mm: float = Field(default=250.0, gt=0)
+    corner_z_mm: float | None = None   # null = рабочая плоскость
+    feed_mms: float = Field(default=20.0, gt=0)
+    # Предел момента, который ставится приводам НА ВРЕМЯ хоминга. Упор ловится
+    # тем, что привод в него упирается и вал встаёт, — другого однозначного
+    # признака нет: подходя к углу, трос натягивается и сам по себе.
+    # Ставится ниже рабочего предела: во время хоминга трос намеренно тянут
+    # до отказа, и запас по прочности нужен больше обычного.
+    torque_limit_percent: float = Field(default=15.0, gt=0, le=300.0)
+    follow_tension_n: float = Field(default=2.0, gt=0)
+    settle_s: float = Field(default=0.7, gt=0)
+    # Переезд от угла к углу — это вся диагональ рамы на скорости выборки
+    # троса. На четырёхметровой раме при 20 мм/с это минуты, а не секунды.
+    timeout_s: float = Field(default=600.0, gt=0)
 
 
 class AdmittanceCfg(BaseModel):
@@ -204,18 +298,27 @@ class AdmittanceCfg(BaseModel):
 
 
 class SafetyCfg(BaseModel):
-    """Аварийная цепь и границы, за которые софт не должен выходить."""
+    """Границы, за которые софт не должен выходить.
+
+    Аварийный стоп на этой машине — физическая кнопка, снимающая питание с
+    приводов. Софт ею не управляет и знать про неё не обязан: абсолютный
+    энкодер переживает выключение, поэтому после обратного включения отсчёты
+    остаются верными и привязка не теряется.
+
+    Единственная защита, которую софт обязан выставить, — предел момента в
+    самих приводах. Он работает независимо от цикла управления.
+    """
 
     model_config = _STRICT
-    # Разрешение приводов (SON) приходит физическим входом, поэтому софт может
-    # им управлять только через реле. manual — щёлкает человек, gpio — Pi,
-    # sim — симулятор.
-    enable_backend: Literal["manual", "gpio", "sim"] = "manual"
-    enable_gpio_pin: int | None = None
     # Останавливаться, если ось не отвечает дольше этого времени.
     max_state_age_ms: float = Field(default=200.0, gt=0)
-    # Не выходить на железо, пока не доказано, что уставку можно писать часто.
-    require_eeprom_check: bool = True
+    # Предел момента, который пишется в сами приводы (P-069/P-070, % от
+    # номинала). Считается от прочности троса, а не от возможностей мотора:
+    # мотор 4 Н·м на барабане ⌀60 даёт 133 Н, чего хватит порвать что угодно.
+    drive_torque_limit_percent: float = Field(default=20.0, gt=0, le=300.0)
+    # Наибольшая невязка прямой задачи, после которой движение запрещается:
+    # длины перестали сходиться между собой — трос провис или проскользнул.
+    max_fk_residual_mm: float = Field(default=40.0, gt=0)
 
 
 class BusCfg(BaseModel):
@@ -260,6 +363,7 @@ class MachineConfig(BaseModel):
     workspace: WorkspaceCfg
     motion: MotionCfg
     control: ControlCfg
+    homing: HomingCfg = Field(default_factory=HomingCfg)
     admittance: AdmittanceCfg
     safety: SafetyCfg = Field(default_factory=SafetyCfg)
     buses: dict[str, BusCfg]
@@ -314,12 +418,40 @@ class MachineConfig(BaseModel):
                 raise ValueError(f"адрес {a.slave} на шине {a.bus} занят дважды — связь работать не будет")
             seen.add(key)
 
+        if self.geometry.is_planar:
+            zs = [a.pos[2] for a in anchors]
+            if max(zs) - min(zs) > 50.0:
+                raise ValueError(
+                    f"якоря разошлись по высоте на {max(zs) - min(zs):.0f} мм — это уже не "
+                    f"плоская машина. Либо выровняйте модули, либо уберите geometry.plane_z_mm"
+                )
+            sag = self.geometry.sag_mm
+            if sag <= 0:
+                raise ValueError(
+                    f"рабочая плоскость на {self.geometry.plane_z_mm:.0f} мм, а якоря на "
+                    f"{self.geometry.anchor_z_mm:.0f} мм: платформа не может висеть выше точек "
+                    f"схода троса"
+                )
+            if sag < 50.0:
+                raise ValueError(
+                    f"провис всего {sag:.0f} мм. При таком угле тросы почти горизонтальны и "
+                    f"удержание веса требует натяжений в разы больше самого веса — трос порвётся "
+                    f"раньше, чем платформа сдвинется. Опустите рабочую плоскость"
+                )
+
         n = len(anchors)
         if n < self.geometry.dof + 1:
             raise ValueError(
                 f"{n} тросов при dof={self.geometry.dof}: для управляемости нужно "
                 f"минимум dof+1 = {self.geometry.dof + 1}"
             )
+
+        for idx in self.homing.corners:
+            if not 0 <= idx < n:
+                raise ValueError(
+                    f"homing.corners ссылается на угол {idx}, а якорей {n} "
+                    f"(допустимо 0..{n - 1})"
+                )
         return self
 
     # ------------------------------------------------------------------ #
@@ -620,7 +752,7 @@ def patch_yaml(
     """Точечно правит значения в YAML, сохраняя комментарии и порядок.
 
     Ключи — путь через точку, индексы списков числами:
-        patch_yaml(p, {"tension.target_n": 35.0, "winches.0.count_empty": 8123456})
+        patch_yaml(p, {"tension.target_n": 35.0, "winches.0.count_ref": 8123456})
 
     Именно так панель сохраняет настройки: пояснения в файле остаются на месте,
     а не затираются машинным дампом.
@@ -660,9 +792,9 @@ def patch_yaml(
 def save_calibration(winch_values: dict[int, dict[str, Any]], path: str | Path = DEFAULT_MACHINE) -> None:
     """Записывает результаты калибровки в machine.yaml.
 
-    winch_values: {индекс лебёдки: {"count_empty": ..., "length_at_empty_mm": ..., "ea_n": ...}}
+    winch_values: {индекс лебёдки: {"count_ref": ..., "length_at_ref_mm": ..., "ea_n": ...}}
     """
-    allowed = {"count_empty", "length_at_empty_mm", "ea_n"}
+    allowed = {"count_ref", "length_at_ref_mm", "ea_n"}
     updates: dict[str, Any] = {}
     for idx, fields in winch_values.items():
         unknown = set(fields) - allowed

@@ -55,6 +55,8 @@ class SafetyMonitor:
         tensions: np.ndarray | None,
         fk_residual_mm: float,
         moving: bool,
+        guard_model: bool = True,
+        tension_ceiling_n: float | None = None,
     ) -> SafetyVerdict:
         reasons: list[str] = []
         stop = False
@@ -85,34 +87,47 @@ class SafetyMonitor:
         if tensions is not None and len(tensions):
             limits = self.machine.tension
             slack = np.where(tensions < limits.min_n * 0.5)[0]
-            if slack.size and moving:
+            if slack.size and moving and guard_model:
                 stop = True
                 reasons.append(
                     f"тросы {list(slack)} провисли (натяжение ниже {limits.min_n * 0.5:.1f} Н) — "
                     f"платформа неуправляема"
                 )
-            over = np.where(tensions > limits.max_n)[0]
+            ceiling = limits.max_n if tension_ceiling_n is None else tension_ceiling_n
+            over = np.where(tensions > ceiling)[0]
             if over.size:
                 stop = True
                 reasons.append(
                     f"тросы {list(over)} перетянуты: {np.round(tensions[over], 1)} Н "
-                    f"при пределе {limits.max_n:.0f} Н"
+                    f"при пределе {ceiling:.0f} Н"
                 )
 
-        if pose is None and moving:
+        if pose is None and moving and guard_model:
+            # Режимы, работающие напрямую скоростями тросов, положения не
+            # требуют — они его и добывают. Запрещать им движение из-за
+            # отсутствия привязки значило бы запретить первый запуск.
             stop = True
             reasons.append("положение платформы неизвестно — движение запрещено")
 
-        if fk_residual_mm > 25.0:
-            health = Health.WARNING
-            reasons.append(
-                f"длины тросов не сходятся между собой на {fk_residual_mm:.0f} мм — "
-                f"проскользнул трос, провис или уехала калибровка"
-            )
-        if fk_residual_mm > 100.0:
-            stop = True
+        # Невязка прямой задачи имеет смысл только там, где модели положения
+        # можно верить. В хоминге и выборке слабины её нет по построению:
+        # тросы намеренно разной натянутости, а привязка ещё не готова.
+        if guard_model:
+            limit = self.machine.safety.max_fk_residual_mm
+            if fk_residual_mm > limit:
+                health = Health.WARNING
+                reasons.append(
+                    f"длины тросов не сходятся между собой на {fk_residual_mm:.0f} мм "
+                    f"при пределе {limit:.0f} — проскользнул трос, провис или "
+                    f"уехала привязка"
+                )
+            if fk_residual_mm > 2.5 * limit:
+                stop = True
 
-        if stop and health is Health.OK:
+        # Остановка — это всегда неисправность, даже если по дороге уже
+        # успело набежать предупреждение. Иначе panel показывала бы «внимание»
+        # там, где машина на самом деле встала.
+        if stop:
             health = Health.FAULT
         elif reasons and health is Health.OK:
             health = Health.WARNING

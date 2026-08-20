@@ -1,18 +1,21 @@
 """Перевод отсчётов энкодера в длину троса и обратно.
 
-Два эффекта, без которых числа не сходятся.
+Калибруются два числа на лебёдку: отсчёт энкодера в опорной точке и длина
+троса в этот момент. Опорная точка — угол, в который коробка подтягивается
+при хоминге.
 
-**Слои намотки.** Леска ложится на барабан слоями, и радиус растёт на её
-диаметр за слой. При леске 0.5 мм на барабане ⌀60 это 1.7 % масштаба за
-слой, то есть примерно каждые 10 метров троса. Модель «столько-то
-миллиметров на импульс» здесь просто неверна, поэтому калибруются два
-физических параметра — отсчёт энкодера при пустом барабане и длина троса
-в этот момент, — а длина считается послойно и точна на любом слое.
+**Слои намотки.** Пока трос лежит в один слой, радиус постоянный и связь
+«мм на импульс» линейная. При леске 0.3 мм и барабане ⌀60 в слой входит
+около 34 м, а самый длинный трос на этой раме — 4.5 м, так что слой всегда
+первый. Послойная модель (winding: multi_layer) остаётся на случай другой
+механики: там радиус растёт на диаметр лески за слой, и «мм на импульс»
+перестаёт быть константой.
 
-**Упругость.** Плетёная леска 50 кг на пролёте 8 м при 100 Н удлиняется
-примерно на 5 см. Это на порядок больше всех прочих источников ошибки, но
-оно измеримо: натяжение известно из момента мотора, а жёсткость EA
-определяется калибровкой. Компенсация возвращает точность к миллиметрам.
+**Упругость.** Капрон ⌀0.3 мм имеет EA около 200 Н: пролёт 2.2 м под
+натяжением 9 Н удлиняется примерно на 100 мм. Это на порядок больше целевой
+точности, и без компенсации о сантиметре говорить нельзя. Постоянная часть
+удлинения уходит в привязку и не мешает; мешает изменение натяжения по
+рабочей зоне, и его компенсирует `stretched()` по измеренному моменту.
 """
 from __future__ import annotations
 
@@ -65,7 +68,15 @@ class LineModel:
         return TWO_PI * self.per_layer * (layers * self.r0 + self.d * layers * layers / 2.0)
 
     def wound_length(self, turns: float) -> float:
-        """Сколько троса намотано на барабан при `turns` витках."""
+        """Сколько троса намотано на барабан при `turns` витках.
+
+        При однослойной укладке число витков может быть и отрицательным:
+        опорная точка калибровки — угол, а не пустой барабан, и относительно
+        неё трос бывает как намотан, так и стравлен. Радиус при этом
+        постоянный, поэтому связь остаётся линейной в обе стороны.
+        """
+        if self.single_layer:
+            return TWO_PI * self.layer_radius(0) * turns
         if turns <= 0:
             return 0.0
         layer = self.layer_of(turns)
@@ -74,10 +85,10 @@ class LineModel:
 
     def turns_for_wound(self, wound: float) -> float:
         """Обратное к wound_length."""
-        if wound <= 0:
-            return 0.0
         if self.single_layer:
             return wound / (TWO_PI * self.layer_radius(0))
+        if wound <= 0:
+            return 0.0
         layer = 0
         while self._full_layers_length(layer + 1) <= wound:
             layer += 1
@@ -91,31 +102,36 @@ class LineModel:
     # ------------------------------------------------------------------ #
     def _require_calibration(self) -> tuple[int, float]:
         w = self.winch
-        if w.count_empty is None or w.length_at_empty_mm is None:
+        if w.count_ref is None or w.length_at_ref_mm is None:
             raise ConfigError(
-                f"лебёдка {w.anchor} не откалибрована: неизвестны count_empty и "
-                f"length_at_empty_mm. Пройдите калибровку — без неё отсчёт энкодера "
+                f"лебёдка {w.anchor} не привязана: неизвестны count_ref и "
+                f"length_at_ref_mm. Прогоните хоминг — без него отсчёт энкодера "
                 f"нельзя перевести в длину троса."
             )
-        return w.count_empty, w.length_at_empty_mm
+        return w.count_ref, w.length_at_ref_mm
 
     def turns_at(self, count: int) -> float:
-        """Сколько витков намотано при данном отсчёте энкодера."""
-        count_empty, _ = self._require_calibration()
-        turns = self.winch.direction * (count - count_empty) / self.counts_per_drum_rev
-        return max(0.0, turns)
+        """Сколько витков намотано относительно опорной точки калибровки.
+
+        При однослойной укладке значение может быть отрицательным — см.
+        wound_length. При многослойной отрицательные витки лишены смысла:
+        радиус там считается от пустого барабана.
+        """
+        count_ref, _ = self._require_calibration()
+        turns = self.winch.direction * (count - count_ref) / self.counts_per_drum_rev
+        return turns if self.single_layer else max(0.0, turns)
 
     def length_from_counts(self, count: int) -> float:
         """Свободная (ненагруженная) длина троса от схода до платформы, мм."""
-        _, length_at_empty = self._require_calibration()
-        return length_at_empty - self.wound_length(self.turns_at(count))
+        _, length_at_ref = self._require_calibration()
+        return length_at_ref - self.wound_length(self.turns_at(count))
 
     def counts_from_length(self, length_mm: float) -> int:
         """Обратное к length_from_counts."""
-        count_empty, length_at_empty = self._require_calibration()
-        wound = length_at_empty - length_mm
-        turns = self.turns_for_wound(max(0.0, wound))
-        return int(round(count_empty + self.winch.direction * turns * self.counts_per_drum_rev))
+        count_ref, length_at_ref = self._require_calibration()
+        wound = length_at_ref - length_mm
+        turns = self.turns_for_wound(wound if self.single_layer else max(0.0, wound))
+        return int(round(count_ref + self.winch.direction * turns * self.counts_per_drum_rev))
 
     def counts_per_mm(self, count: int) -> float:
         """Локальный масштаб при данном отсчёте — нужен контуру управления."""

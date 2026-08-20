@@ -12,7 +12,7 @@ from cdpr.line import TWO_PI, LineModel
 @pytest.fixture
 def winch(machine):
     return machine.ordered_winches()[0].model_copy(
-        update={"count_empty": 0, "length_at_empty_mm": 12000.0}
+        update={"count_ref": 0, "length_at_ref_mm": 12000.0}
     )
 
 
@@ -28,9 +28,12 @@ def test_first_layer_matches_simple_circumference(line):
     assert line.wound_length(10) == pytest.approx(10 * one_turn)
 
 
-def test_radius_grows_by_line_diameter_per_layer(line, winch):
-    assert line.layer_radius(1) - line.layer_radius(0) == pytest.approx(winch.line_diameter_mm)
-    assert line.layer_radius(3) - line.layer_radius(0) == pytest.approx(3 * winch.line_diameter_mm)
+def test_radius_grows_by_line_diameter_per_layer(winch):
+    """Послойная модель нужна другой механике: на этой машине трос лежит в
+    один слой, поэтому проверяем её на явно многослойной лебёдке."""
+    layered = LineModel(winch.model_copy(update={"winding": "multi_layer"}))
+    assert layered.layer_radius(1) - layered.layer_radius(0) == pytest.approx(winch.line_diameter_mm)
+    assert layered.layer_radius(3) - layered.layer_radius(0) == pytest.approx(3 * winch.line_diameter_mm)
 
 
 def test_layer_transition_is_continuous(line):
@@ -52,10 +55,13 @@ def test_counts_length_roundtrip(line):
         assert line.length_from_counts(counts) == pytest.approx(length, abs=0.01)
 
 
-def test_ignoring_layers_would_be_a_large_error(line):
-    """Ради этого модель и послойная: на третьем слое масштаб уходит на 5 %,
-    а это полметра на десяти метрах троса."""
-    error = line.radius_at(330) / line.radius_at(0) - 1.0
+def test_ignoring_layers_would_be_a_large_error(winch):
+    """Ради этого модель и послойная: на нескольких слоях масштаб уходит на
+    проценты, а это десятки сантиметров на длинном тросе. На капроне 0.3 мм
+    слоёв не будет, но механика может смениться."""
+    thick = LineModel(winch.model_copy(update={"winding": "multi_layer",
+                                               "line_diameter_mm": 0.5}))
+    error = thick.radius_at(3 * thick.per_layer) / thick.radius_at(0) - 1.0
     assert error > 0.04
 
 
@@ -66,14 +72,15 @@ def test_single_layer_mode_is_linear(winch):
 
 
 def test_one_layer_holds_a_lot_of_line(line):
-    """При леске 0.5 мм и барабане шириной 55 мм в первом слое больше 20 м —
-    на раме 6x5 м второй слой попросту не начинается."""
+    """При леске 0.3 мм и барабане шириной 55 мм в слой входит больше 30 м, а
+    самый длинный трос на этой раме около 4.5 м. Второй слой не начинается
+    никогда, поэтому «мм на импульс» — честная константа."""
     assert line.wound_length(line.per_layer) / 1000.0 > 20.0
 
 
 def test_uncalibrated_winch_refuses_to_convert(machine):
     line = LineModel(machine.ordered_winches()[0])
-    with pytest.raises(ConfigError, match="не откалибрована"):
+    with pytest.raises(ConfigError, match="не привязана"):
         line.length_from_counts(0)
 
 
@@ -102,7 +109,8 @@ def test_elasticity_is_the_dominant_error_when_uncompensated(winch):
     assert line.unstretched(line.stretched(8000.0, 100.0), 100.0) == pytest.approx(8000.0)
 
 
-def test_no_ea_means_no_compensation(line):
-    assert line.winch.ea_n is None
-    assert line.stretched(8000.0, 100.0) == 8000.0
-    assert line.elongation(8000.0, 100.0) == 0.0
+def test_no_ea_means_no_compensation(winch):
+    """Пока жёсткость не задана, поправки нет — и это честнее, чем гадать."""
+    bare = LineModel(winch.model_copy(update={"ea_n": None}))
+    assert bare.stretched(8000.0, 100.0) == 8000.0
+    assert bare.elongation(8000.0, 100.0) == 0.0

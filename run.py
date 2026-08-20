@@ -26,8 +26,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--machine", default=str(DEFAULT_MACHINE))
     ap.add_argument("--profile", default=str(DEFAULT_PROFILE))
-    ap.add_argument("--no-enable", action="store_true",
-                    help="не разрешать приводы при старте (по умолчанию и так не разрешаются)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -74,13 +72,20 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 70)
     print(f"  {runtime.machine.name}")
     print(f"  {'МОДЕЛЬ (железо не подключено)' if args.sim else 'РАБОТА С ЖЕЛЕЗОМ'}")
-    print(f"  тросов: {runtime.machine.n_cables}, "
-          f"{'откалибрована' if runtime.machine.is_calibrated else 'НЕ ОТКАЛИБРОВАНА'}")
-    print(f"  разрешение приводов: {runtime.drives.enabler.describe()}")
-    if not runtime.drives.enabler.is_automatic:
-        print("  ВНИМАНИЕ: софт не может снять разрешение сам — кнопка аварийного")
-        print("            стопа в панели только обнулит скорости. Настоящий стоп —")
-        print("            размыкание цепи SON, держите его под рукой.")
+    machine = runtime.machine
+    shape = "плоская" if machine.geometry.is_planar else "пространственная"
+    print(f"  тросов: {machine.n_cables}, {shape}, "
+          f"{'привязана' if machine.is_calibrated else 'НЕ ПРИВЯЗАНА — пройдите хоминг'}")
+    if machine.geometry.is_planar:
+        print(f"  рабочая плоскость: {machine.geometry.plane_z_mm:.0f} мм "
+              f"(провис {machine.geometry.sag_mm:.0f} мм под модулями)")
+    winch = machine.ordered_winches()[0]
+    limit = machine.safety.drive_torque_limit_percent
+    print(f"  предел момента в приводах: {limit:.0f} % = "
+          f"{winch.torque_percent_to_force(limit):.1f} Н на тросе "
+          f"(полный момент дал бы {winch.torque_percent_to_force(100.0):.0f} Н)")
+    print("  СТОП: физическая кнопка, снимающая питание с приводов. Софт ею не")
+    print("        управляет; кнопка в панели только обнуляет уставки.")
     print()
     print(f"  Панель:  http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}/")
     print(f"  API:     http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}/api/docs")

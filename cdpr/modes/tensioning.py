@@ -33,6 +33,10 @@ class AutoTensionMode(Mode):
     def requires_homing(self) -> bool:
         return False
 
+    @property
+    def tolerates_slack(self) -> bool:
+        return True
+
     def enter(self, ctx) -> None:  # noqa: ANN001
         self._elapsed = 0.0
         if self.target_n is None:

@@ -161,7 +161,7 @@
             <button class="j" data-jog="0,-1,0"><span class="ar">↓</span><span class="lb">назад</span><span class="ax">Y−</span></button>
             <button class="j diag" data-jog="1,-1,0"><span class="ar">↘</span><span class="lb">назад-вправо</span><span class="ax">X+ Y−</span></button>
           </div>
-          <div class="jogz">
+          <div class="jogz" id="jog-z">
             <button class="j" data-jog="0,0,1"><span class="ar">↑</span><span class="lb">выше</span><span class="ax">Z+</span></button>
             <button class="j" data-jog="0,0,-1"><span class="ar">↓</span><span class="lb">ниже</span><span class="ax">Z−</span></button>
           </div>
@@ -200,7 +200,7 @@
         <div class="mdi">
           <label class="field"><span>X, мм</span><input id="mdi-x" type="number" step="1"></label>
           <label class="field"><span>Y, мм</span><input id="mdi-y" type="number" step="1"></label>
-          <label class="field"><span>Z, мм</span><input id="mdi-z" type="number" step="1"></label>
+          <label class="field" id="mdi-z-field"><span>Z, мм</span><input id="mdi-z" type="number" step="1"></label>
           <label class="field"><span>подача, мм/с</span><input id="mdi-f" type="number" step="10" value="100"></label>
         </div>
         <div class="row">

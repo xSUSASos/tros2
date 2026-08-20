@@ -110,6 +110,15 @@ function applyInfo() {
   slider.value = S.info.tension.target_n;
   $("tension-value").textContent = `${S.info.tension.target_n} Н`;
 
+  // На плоской машине Z не управляется: органы, которые ничего не делают,
+  // хуже отсутствующих — по ним судят о том, что машина умеет.
+  if (S.info.planar) {
+    const zpad = $("jog-z");
+    if (zpad) zpad.classList.add("hidden");
+    const zfield = $("mdi-z-field");
+    if (zfield) zfield.classList.add("hidden");
+  }
+
   const feed = $("jog-feed");
   feed.max = Math.round(S.info.motion.max_velocity_mms);
   feed.value = Math.round(S.info.motion.jog_feed_mms);
@@ -177,8 +186,15 @@ function applyState() {
 
   const margin = $("margin");
   const required = S.info ? S.info.workspace.feasibility_margin_n : 0;
-  margin.textContent = st.margin_n.toFixed(0) + " Н";
-  margin.className = "mono " + (st.margin_n >= required ? "ok" : st.margin_n > 0 ? "warn" : "bad");
+  // Пока положение неизвестно, запас не «ноль», а «не посчитан». Разница
+  // важная: ноль в этом поле означает, что платформу здесь не удержать.
+  if (st.pose_mm === null) {
+    margin.textContent = "—";
+    margin.className = "mono";
+  } else {
+    margin.textContent = st.margin_n.toFixed(0) + " Н";
+    margin.className = "mono " + (st.margin_n >= required ? "ok" : st.margin_n > 0 ? "warn" : "bad");
+  }
 
   const drives = $("drives-state");
   const online = st.online.filter(Boolean).length;

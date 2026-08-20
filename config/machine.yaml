@@ -16,9 +16,9 @@ geometry:
   # чисел напрямую определяет точность всей системы (ошибка позиции ~ 2x).
   anchors:
   - {id: A1, pos: [0.0, 0.0, 3000.0], bus: bus0, slave: 1}
-  - {id: A2, pos: [6000.0, 0.0, 3000.0], bus: bus0, slave: 2}
-  - {id: A3, pos: [6000.0, 5000.0, 3000.0], bus: bus0, slave: 3}
-  - {id: A4, pos: [0.0, 5000.0, 3000.0], bus: bus0, slave: 4}
+  - {id: A2, pos: [3980.0, 0.0, 3000.0], bus: bus0, slave: 2}
+  - {id: A3, pos: [3980.0, 1930.0, 3000.0], bus: bus0, slave: 3}
+  - {id: A4, pos: [0.0, 1930.0, 3000.0], bus: bus0, slave: 4}
 
 platform:
   mass_kg: 5.0
@@ -41,10 +41,10 @@ winch_defaults:
   # multi_layer  — трос ложится слоями, эффективный радиус растёт: r(n).
   winding: multi_layer
   gear_ratio: 1.0                  # мотор:барабан
-  encoder_counts_per_rev: 8388608  # 23 бита (P-184 = 23)
+  encoder_counts_per_rev: 10000    # 80AST-A1C04025: 2500-line энкодер x4
   max_rpm: 3000
   rated_torque_nm: 4.0
-  direction: 1                     # +1: положительная скорость = наматывание
+  direction: -1                    # +1: положительная скорость = наматывание (все 4 мотора реверсированы)
 
   # --- калибруется автоматически, не править руками ---
   # Многослойная намотка: эффективный радиус растёт на диаметр лески за слой,
@@ -106,7 +106,7 @@ safety:
 
 buses:
   bus0:
-    port: "COM3"
+    port: "/dev/ttyUSB0"
     baudrate: 115200
     parity: "E"          # P-183 = 1 (8E1) по умолчанию у привода
     bytesize: 8

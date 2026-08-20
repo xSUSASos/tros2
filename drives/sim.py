@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 
-from cdpr.config import DriveProfile
+from cdpr.config import ConfigError, DriveProfile
 from drives.base import BusTimeout, CrcError, ModbusException, Transport, TransportError
 
 log = logging.getLogger(__name__)
@@ -183,15 +183,26 @@ class SimTransport(Transport):
         for i, ax in enumerate(self.axes.values()):
             ax.position_counts = float(self._rng.randint(0, counts_per_rev) + i * 1000)
 
+        # Адрес мог прийти либо явным полем address, либо базой + номером
+        # параметра / order — считаем его так же, как считает сам профиль,
+        # иначе симулятор и настоящий драйвер разойдутся в том, что лежит
+        # по какому адресу (P-xxx с известным param_base, но без явного
+        # address, иначе был бы виден как "несуществующий регистр").
         self._addr_param: dict[int, str] = {}
         self._addr_monitor: dict[int, tuple[str, int]] = {}
         for pname, spec in self.profile.params.items():
-            if spec.address is not None:
-                self._addr_param[spec.address] = pname
+            try:
+                address = self.profile.param_address(pname)
+            except ConfigError:
+                continue
+            self._addr_param[address] = pname
         for mname, spec in self.profile.monitors.items():
-            if spec.address is not None:
-                for w in range(spec.words):
-                    self._addr_monitor[spec.address + w] = (mname, w)
+            try:
+                address = self.profile.monitor_address(mname)
+            except ConfigError:
+                continue
+            for w in range(spec.words):
+                self._addr_monitor[address + w] = (mname, w)
 
         # Параметры связи должны отражать то, как мы на самом деле подключены —
         # именно на этом совпадении держится восстановление карты регистров
@@ -212,9 +223,13 @@ class SimTransport(Transport):
                 "speed_source": prof.encode_value("speed_source", "analog"),
             }
             for pname, value in preset.items():
-                spec = prof.params.get(pname)
-                if spec is not None and spec.address is not None:
-                    ax.params[spec.address] = int(value) & 0xFFFF
+                if pname not in prof.params:
+                    continue
+                try:
+                    address = prof.param_address(pname)
+                except ConfigError:
+                    continue
+                ax.params[address] = int(value) & 0xFFFF
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
@@ -307,13 +322,26 @@ class SimTransport(Transport):
         with self._lock:
             ax = self._simulate_link(slave)
             self._tick()
+            # Мониторы и параметры обычно живут в разных диапазонах регистров
+            # Modbus (input FC04 и holding FC03) и не делят адреса — но
+            # у профиля без подтверждённой карты (репетиция разведки) обе
+            # таблицы намеренно совпадают по адресам и function, поэтому
+            # function решает только когда адрес занят в ОБЕИХ таблицах
+            # сразу; иначе смотрим туда, где адрес реально есть.
+            is_monitor_function = function == self.profile.monitor_function_code()
             out: list[int] = []
             for a in range(address, address + count):
-                if a in self._addr_monitor:
+                in_monitor = a in self._addr_monitor
+                in_param = a in self._addr_param
+                if in_monitor and in_param:
+                    use_monitor = is_monitor_function
+                else:
+                    use_monitor = in_monitor
+                if use_monitor:
                     name, word = self._addr_monitor[a]
                     spec = self.profile.monitors[name]
                     out.append(self._split(self._monitor_raw(ax, name), spec.words)[word])
-                elif a in self._addr_param:
+                elif in_param:
                     out.append(ax.params.get(a, self._param_default(a)) & 0xFFFF)
                 else:
                     self.stats.exceptions += 1

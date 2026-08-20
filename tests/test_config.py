@@ -111,11 +111,22 @@ def test_winch_defaults_are_merged(machine):
 # --------------------------------------------------------------------------- #
 def test_profile_reports_addresses_unknown(profile):
     """Пока карта регистров не снята с железа, профиль честно об этом говорит."""
-    assert not profile.is_discovered
+    undiscovered = profile.model_copy(deep=True)
+    undiscovered.addressing.param_base = None
+    undiscovered.addressing.monitor_base = None
+    assert not undiscovered.is_discovered
     with pytest.raises(ConfigError, match="reg_probe"):
-        profile.param_address("speed_preset_1")
+        undiscovered.param_address("speed_preset_1")
     with pytest.raises(ConfigError, match="reg_probe"):
-        profile.monitor_address("actual_position")
+        undiscovered.monitor_address("encoder_bits_now")
+
+
+def test_profile_addresses_confirmed_by_manual(profile):
+    """Карта регистров подтверждена V3.3 (FC03 addr = P-xxx, таблица FC04) —
+    дефолтный профиль больше не требует reg_probe для выхода на железо."""
+    assert profile.is_discovered
+    assert profile.param_address("speed_preset_1") == 137
+    assert profile.monitor_address("actual_position") == 5
 
 
 def test_profile_enum_encoding(profile):
@@ -149,7 +160,15 @@ def test_hot_register_is_the_speed_setpoint(profile):
 def test_eeprom_safety_unknown_until_probed(profile):
     """Пока не проверено, что горячий регистр не пишется в EEPROM,
     выходить на железо с циклом 50 Гц нельзя."""
-    assert profile.eeprom_safe is None
+    unprobed = profile.model_copy(deep=True)
+    unprobed.eeprom_safe = None
+    assert unprobed.eeprom_safe is None
+
+
+def test_eeprom_safety_confirmed_by_manual(profile):
+    """V3.3: FC06 пишет только в RAM, EEPROM требует явного FC41 — частая
+    запись hot_register ресурс EEPROM не расходует."""
+    assert profile.eeprom_safe is True
 
 
 def test_alarm_text(profile):

@@ -93,7 +93,8 @@ def sim(profile):
 
 def _read(sim, slave, monitor):
     spec = sim.profile.monitors[monitor]
-    regs = sim.read_registers(slave, spec.address, spec.words)
+    regs = sim.read_registers(slave, spec.address, spec.words,
+                              function=sim.profile.monitor_function_code())
     return decode(regs, spec.type)
 
 

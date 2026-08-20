@@ -51,8 +51,11 @@ def test_plan_reads_offsets_decode_correctly(profile):
 #  Защита от опасного пуска
 # --------------------------------------------------------------------------- #
 def test_refuses_hardware_without_register_map(machine, profile):
+    undiscovered = profile.model_copy(deep=True)
+    undiscovered.addressing.param_base = None
+    undiscovered.addressing.monitor_base = None
     with pytest.raises(ConfigError, match="reg_probe"):
-        build_drive_group(machine, profile, simulated=False)
+        build_drive_group(machine, undiscovered, simulated=False)
 
 
 def test_refuses_hardware_until_eeprom_checked(machine, profile):

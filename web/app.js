@@ -234,6 +234,7 @@ function applyState() {
 }
 
 function drawCables() {
+  drawCableJogTensions();
   const st = S.state, box = $("cables");
   if (!st || !st.tensions_n) return;
   const limits = S.info ? S.info.tension : { min_n: 5, max_n: 120 };
@@ -763,14 +764,15 @@ function moduleName(i) {
 // --------------------------------------------------------------------------
 function buildCableJog() {
   const box = $("cable-jog");
-  if (box.children.length) return;
   const n = (S.info && S.info.n_cables) || 4;
-  box.innerHTML = Array.from({ length: n }, (_, i) =>
-    `<div class="row">
-       <span class="cable-name">${moduleName(i)}</span>
-       <button data-cable-in="${i}">выбрать</button>
-       <button data-cable-out="${i}">стравить</button>
-     </div>`).join("");
+  if (box.children.length === n) return;
+  box.innerHTML = Array.from({ length: n }, (_, i) => `
+    <div class="jogcable">
+      <span class="cable-id">${moduleName(i)}</span>
+      <button class="btn" data-cable-in="${i}">выбрать</button>
+      <button class="btn" data-cable-out="${i}">стравить</button>
+      <span class="cable-val">—</span>
+    </div>`).join("");
 
   const feed = () => Math.abs(parseFloat($("cable-feed").value) || 15);
   // Держим кнопку — крутится, отпустили — стоит. Так безопаснее: рука
@@ -780,14 +782,27 @@ function buildCableJog() {
       const index = Number(btn.dataset.cableIn ?? btn.dataset.cableOut);
       const run = (speed) => api("/api/cable/speed", "POST",
                                  { index, speed_mms: speed }).catch(() => {});
-      btn.onpointerdown = (e) => { btn.setPointerCapture(e.pointerId); run(sign * feed()); };
-      btn.onpointerup = () => run(0);
-      btn.onpointercancel = () => run(0);
-      btn.onpointerleave = () => run(0);
+      btn.onpointerdown = (e) => {
+        btn.setPointerCapture(e.pointerId);
+        btn.classList.add("active");
+        run(sign * feed());
+      };
+      const release = () => { btn.classList.remove("active"); run(0); };
+      btn.onpointerup = release;
+      btn.onpointercancel = release;
+      btn.onpointerleave = release;
     });
   };
   bind("[data-cable-in]", +1);
   bind("[data-cable-out]", -1);
+}
+
+function drawCableJogTensions() {
+  const st = S.state, box = $("cable-jog");
+  if (!st || !st.tensions_n || box.children.length !== st.tensions_n.length) return;
+  st.tensions_n.forEach((value, i) => {
+    box.children[i].querySelector(".cable-val").textContent = value.toFixed(1);
+  });
 }
 
 $("cable-stop").onclick = async () => {

@@ -617,4 +617,10 @@ input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: var(--ring);
 .geo label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; }
 .geo input { padding: 5px 6px; }
 
-.cable-name { display: inline-block; min-width: 3.5em; font-variant-numeric: tabular-nums; opacity: .8; }
+/* Ручное вращение барабанов: тот же четырёхколоночный ритм, что и у
+   таблицы натяжений ниже, чтобы глаз не перестраивался между блоками. */
+.jogcable-head { grid-template-columns: 34px 1fr 1fr 62px; }
+.jogcable { display: grid; grid-template-columns: 34px 1fr 1fr 62px; gap: 8px; align-items: center; }
+.jogcable button { width: 100%; }
+.jogcable .cable-val { min-width: 0; }
+.field-row #cable-feed, .field-row #homing-corners { width: 84px; }

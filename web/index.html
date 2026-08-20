@@ -276,30 +276,40 @@
         этого не нужно. Отсюда и начинают на новой машине — проверить, что мотор
         крутится, что он крутится в ту сторону и что за десять оборотов сматывается
         столько троса, сколько говорит формула.</p>
-      <div id="cable-jog" class="geo"></div>
-      <div class="row">
-        <label>скорость <input id="cable-feed" type="number" value="15" step="5"><span class="unit">мм/с</span></label>
-        <button id="cable-stop" class="ghost">Остановить все</button>
+      <div class="cable-head jogcable-head">
+        <span>трос</span><span>выбрать</span><span>стравить</span><span>натяжение</span>
+      </div>
+      <div id="cable-jog" class="cables"></div>
+      <div class="field-row">
+        <span class="field-label">Скорость</span>
+        <input id="cable-feed" type="number" value="15" step="5" min="1" max="200">
+        <span class="unit">мм/с</span>
+        <button id="cable-stop" class="btn ghost grow">Остановить все</button>
       </div>
 
       <h3>2. Хоминг по углам</h3>
       <p class="hint">Коробка сама подтягивается к модулю и упирается — там и
         записываются отсчёты энкодеров. Положение для этого не нужно: режим работает
-        напрямую скоростями тросов. Одного угла достаточно, чтобы поехать; остальные
-        углы работают проверкой и дают жёсткость троса.</p>
+        напрямую скоростями тросов. Одного угла достаточно.</p>
+      <p class="hint">Лишние углы дают проверку, но слабую, и об этом лучше знать
+        заранее: у угла натянут ровно один трос, остальные три провисают, а провисший
+        трос о геометрии не говорит ничего. Настоящие проверки другие — проворот
+        барабана рукой ловит ошибку масштаба, рулетка ошибку в размерах рамы.</p>
       <p class="hint">Перед первым запуском померьте линейкой, где встаёт центр коробки,
         упершись в модуль, и впишите это в <code>homing.corner_inset_mm</code>. Ошибка
         в этом числе сдвигает всю систему координат целиком, но движение не искажает.</p>
-      <div class="row">
-        <label>углы <input id="homing-corners" type="text" value="0,1,3" size="8"></label>
-        <button id="homing-start">Начать хоминг</button>
-        <button id="homing-abort" class="ghost">Прервать</button>
+      <div class="field-row">
+        <span class="field-label">Углы</span>
+        <input id="homing-corners" type="text" value="0"
+               title="номера модулей через запятую; одного достаточно, чтобы поехать">
+        <button id="homing-start" class="btn grow">Начать хоминг</button>
+        <button id="homing-abort" class="btn ghost">Прервать</button>
       </div>
       <div class="progress"><div id="homing-bar"></div></div>
       <div id="homing-phase" class="hint">не запущено</div>
       <div class="row">
-        <button id="homing-solve">Рассчитать</button>
-        <button id="homing-apply">Рассчитать и сохранить</button>
+        <button id="homing-solve" class="btn grow">Рассчитать</button>
+        <button id="homing-apply" class="btn grow">Рассчитать и сохранить</button>
       </div>
       <pre id="calib-report" class="report"></pre>
     </div>

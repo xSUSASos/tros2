@@ -40,23 +40,24 @@
     <span class="chip mono" id="chip-rate">— Гц</span>
   </div>
 
-  <button id="theme-toggle" class="icon-btn" title="Тема: по системе" aria-label="Переключить тему">
-    <svg class="ico ico-auto" viewBox="0 0 24 24" width="17" height="17" fill="none"
+  <button id="theme-toggle" class="icon-btn" title="Тема оформления">
+    <svg class="ico ico-auto" viewBox="0 0 24 24" width="16" height="16" fill="none"
          stroke="currentColor" stroke-width="1.7">
       <circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor" stroke="none"/>
     </svg>
-    <svg class="ico ico-light" viewBox="0 0 24 24" width="17" height="17" fill="none"
+    <svg class="ico ico-light" viewBox="0 0 24 24" width="16" height="16" fill="none"
          stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
       <circle cx="12" cy="12" r="4.2"/>
       <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/>
     </svg>
-    <svg class="ico ico-dark" viewBox="0 0 24 24" width="17" height="17">
+    <svg class="ico ico-dark" viewBox="0 0 24 24" width="16" height="16">
       <path d="M20.3 14.6A8.6 8.6 0 0 1 9.4 3.7a8.6 8.6 0 1 0 10.9 10.9Z" fill="currentColor"/>
     </svg>
+    <span id="theme-label">Тема: авто</span>
   </button>
 
-  <button id="estop" class="estop" title="Аварийный стоп">
-    <span class="estop-face">АВАРИЙНЫЙ<br>СТОП</span>
+  <button id="estop" class="estop" title="Обнулить скорости и заблокировать движение">
+    <span id="estop-face" class="estop-face">АВАРИЙНЫЙ<br>СТОП</span>
   </button>
 </header>
 
@@ -65,7 +66,7 @@
     <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm1 6a1 1 0 1 0-2 0 1 1 0 0 0 2 0Z"/>
   </svg>
   <div id="banner-text"></div>
-  <button id="banner-close" class="flash-close" aria-label="Скрыть">✕</button>
+  <button id="banner-close" class="flash-close" title="Скрыть сообщение">✕</button>
 </div>
 
 <main>
@@ -73,14 +74,14 @@
   <section class="panel viewport">
     <div class="panel-head">
       <div class="seg" id="view-seg">
-        <button class="tab active" data-view="top">Вид сверху</button>
-        <button class="tab" data-view="side">Вид сбоку</button>
+        <button class="tab active" data-view="top">Вид сверху (X-Y)</button>
+        <button class="tab" data-view="side">Вид сбоку (X-Z)</button>
       </div>
       <span class="spacer"></span>
-      <label class="switch">
+      <label class="switch" title="закрасить область, где платформу удержат все тросы">
         <input type="checkbox" id="show-workspace" checked><span class="track"></span>рабочая зона
       </label>
-      <label class="switch">
+      <label class="switch" title="показать траекторию загруженной программы">
         <input type="checkbox" id="show-path"><span class="track"></span>путь программы
       </label>
     </div>
@@ -114,10 +115,16 @@
     </div>
 
     <div class="metrics">
-      <div class="metric"><span>невязка</span><b class="mono" id="pos-res">—</b></div>
-      <div class="metric"><span>запас</span><b class="mono" id="margin">—</b></div>
+      <div class="metric" title="расхождение прямой задачи кинематики: насколько длины тросов противоречат друг другу">
+        <span>расхождение по тросам</span><b class="mono" id="pos-res">—</b>
+      </div>
+      <div class="metric" title="запас по натяжению до предела в текущей точке">
+        <span>запас по натяжению</span><b class="mono" id="margin">—</b>
+      </div>
       <div class="metric"><span>приводы</span><b id="drives-state">—</b></div>
-      <div class="metric"><span>цикл</span><b class="mono" id="cycle">—</b></div>
+      <div class="metric" title="самый слабый и самый нагруженный трос сейчас">
+        <span>натяжение тросов</span><b class="mono" id="tension-range">—</b>
+      </div>
     </div>
   </section>
 
@@ -135,56 +142,61 @@
     <div class="tabpage active" id="tab-control">
       <div class="power">
         <button id="btn-enable" class="btn primary big">Разрешить приводы</button>
-        <button id="btn-idle" class="btn big">Стоп</button>
+        <button id="btn-idle" class="btn big" title="плавно остановить и перевести в ожидание; разрешение с приводов не снимается">Плавно остановить</button>
       </div>
 
       <section class="block">
         <h3>Ручное перемещение</h3>
         <div class="jog">
           <div class="jogpad">
-            <button class="j diag" data-jog="-1,1,0" title="−X +Y">◤</button>
-            <button class="j" data-jog="0,1,0">Y<b>+</b></button>
-            <button class="j diag" data-jog="1,1,0" title="+X +Y">◥</button>
-            <button class="j" data-jog="-1,0,0">X<b>−</b></button>
-            <button class="j home" id="jog-home" title="подставить центр поля и лучшую высоту">⌂</button>
-            <button class="j" data-jog="1,0,0">X<b>+</b></button>
-            <button class="j diag" data-jog="-1,-1,0" title="−X −Y">◣</button>
-            <button class="j" data-jog="0,-1,0">Y<b>−</b></button>
-            <button class="j diag" data-jog="1,-1,0" title="+X −Y">◢</button>
+            <button class="j diag" data-jog="-1,1,0"><span class="ar">↖</span><span class="lb">вперёд-влево</span><span class="ax">X− Y+</span></button>
+            <button class="j" data-jog="0,1,0"><span class="ar">↑</span><span class="lb">вперёд</span><span class="ax">Y+</span></button>
+            <button class="j diag" data-jog="1,1,0"><span class="ar">↗</span><span class="lb">вперёд-вправо</span><span class="ax">X+ Y+</span></button>
+            <button class="j" data-jog="-1,0,0"><span class="ar">←</span><span class="lb">влево</span><span class="ax">X−</span></button>
+            <button class="j home" id="jog-home" title="не двигает платформу: подставляет в поля ниже центр поля и высоту с наибольшим запасом">
+              <span class="ar">⌖</span><span class="lb">центр поля</span>
+            </button>
+            <button class="j" data-jog="1,0,0"><span class="ar">→</span><span class="lb">вправо</span><span class="ax">X+</span></button>
+            <button class="j diag" data-jog="-1,-1,0"><span class="ar">↙</span><span class="lb">назад-влево</span><span class="ax">X− Y−</span></button>
+            <button class="j" data-jog="0,-1,0"><span class="ar">↓</span><span class="lb">назад</span><span class="ax">Y−</span></button>
+            <button class="j diag" data-jog="1,-1,0"><span class="ar">↘</span><span class="lb">назад-вправо</span><span class="ax">X+ Y−</span></button>
           </div>
           <div class="jogz">
-            <button class="j" data-jog="0,0,1">Z<b>+</b></button>
-            <button class="j" data-jog="0,0,-1">Z<b>−</b></button>
+            <button class="j" data-jog="0,0,1"><span class="ar">↑</span><span class="lb">выше</span><span class="ax">Z+</span></button>
+            <button class="j" data-jog="0,0,-1"><span class="ar">↓</span><span class="lb">ниже</span><span class="ax">Z−</span></button>
           </div>
         </div>
 
         <div class="field-row">
-          <span class="field-label">Шаг, мм</span>
+          <span class="field-label">Шаг</span>
           <div class="seg grow" id="steps">
-            <button data-step="hold" title="пока держите кнопку — платформа едет">УДЕРЖ.</button>
+            <button data-step="hold" title="платформа едет, пока кнопка нажата, и встаёт, когда отпущена">непрерывно</button>
             <button data-step="0.5">0.5</button>
             <button data-step="1">1</button>
             <button data-step="10" class="active">10</button>
             <button data-step="50">50</button>
             <button data-step="200">200</button>
           </div>
+          <span class="unit">мм</span>
         </div>
 
         <div class="field-row">
           <span class="field-label">Подача</span>
-          <input id="jog-feed" type="range" min="1" max="200" step="1" value="60">
+          <input id="jog-feed" type="range" min="1" max="200" step="1" value="60"
+                 title="скорость ручного перемещения">
           <b class="mono value" id="jog-feed-value">60 мм/с</b>
         </div>
 
         <p class="hint">
+          Направления — как на виде сверху: «вперёд» уводит платформу вверх по экрану.<br>
           <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> — X и Y,
           <kbd>PgUp</kbd><kbd>PgDn</kbd> — Z, <kbd>1</kbd>…<kbd>6</kbd> — шаг,
-          <kbd>Esc</kbd> — стоп. Пока курсор в поле ввода, клавиши не работают.
+          <kbd>Esc</kbd> — остановить. Пока курсор в поле ввода, клавиши не работают.
         </p>
       </section>
 
       <section class="block">
-        <h3>Ввод координат</h3>
+        <h3>Переезд в точку</h3>
         <div class="mdi">
           <label class="field"><span>X, мм</span><input id="mdi-x" type="number" step="1"></label>
           <label class="field"><span>Y, мм</span><input id="mdi-y" type="number" step="1"></label>
@@ -192,23 +204,30 @@
           <label class="field"><span>подача, мм/с</span><input id="mdi-f" type="number" step="10" value="100"></label>
         </div>
         <div class="row">
-          <button id="mdi-here" class="btn">Взять текущие</button>
-          <button id="mdi-go" class="btn primary grow">Ехать</button>
+          <button id="mdi-here" class="btn" title="заполнить поля координатами, где платформа стоит сейчас">Взять текущие</button>
+          <button id="mdi-go" class="btn primary grow">Ехать в точку</button>
         </div>
       </section>
 
       <section class="block">
-        <h3>Натяжение</h3>
+        <h3>Натяжение тросов</h3>
         <div class="field-row">
           <span class="field-label">Цель</span>
           <input id="tension-slider" type="range" min="5" max="120" step="1" value="30">
           <b class="mono value" id="tension-value">30 Н</b>
         </div>
-        <p class="hint">цель для самого ненагруженного троса</p>
+        <p class="hint">цель задаётся для самого ненагруженного троса</p>
+        <div class="cable-head">
+          <span>трос</span><span>натяжение</span><span>Н</span><span>привод</span>
+        </div>
         <div class="cables" id="cables"></div>
         <div class="row">
-          <button id="btn-autotension" class="btn">Выбрать слабину</button>
-          <button id="btn-handguide" class="btn toggle">Вести за руку</button>
+          <button id="btn-autotension" class="btn grow" title="подтянуть тросы до целевого натяжения, не двигая платформу">
+            Выбрать слабину тросов
+          </button>
+          <button id="btn-handguide" class="btn toggle grow" title="приводы отпускают трос вслед за усилием руки">
+            Вести за руку
+          </button>
         </div>
       </section>
     </div>
@@ -216,9 +235,9 @@
     <!-- ---------- программа ---------- -->
     <div class="tabpage" id="tab-gcode">
       <div class="cnc-bar">
-        <button id="gcode-run" class="cnc start" disabled><i></i>ПУСК</button>
-        <button id="gcode-pause" class="cnc hold" disabled><i></i>ПАУЗА</button>
-        <button id="gcode-stop" class="cnc halt" disabled><i></i>СТОП</button>
+        <button id="gcode-run" class="cnc start" disabled><b>ПУСК</b><small>начать</small></button>
+        <button id="gcode-pause" class="cnc hold" disabled><b>ПАУЗА</b><small>приостановить</small></button>
+        <button id="gcode-stop" class="cnc halt" disabled><b>СТОП</b><small>прервать</small></button>
       </div>
 
       <div class="progress"><div id="gcode-bar"></div></div>
@@ -228,8 +247,9 @@
       </div>
 
       <div class="field-row">
-        <span class="field-label">Коррекция</span>
-        <input id="gcode-override" type="range" min="10" max="200" step="5" value="100">
+        <span class="field-label">Коррекция подачи</span>
+        <input id="gcode-override" type="range" min="10" max="200" step="5" value="100"
+               title="множитель скорости на ходу, как крутилка на стойке">
         <b class="mono value" id="gcode-override-value">100 %</b>
       </div>
 
@@ -239,39 +259,55 @@
       </div>
 
       <div class="row">
-        <label class="btn" for="gcode-file">Открыть файл</label>
+        <label class="btn" for="gcode-file" title="открыть .gcode, .nc или .txt с диска">Открыть файл</label>
         <input type="file" id="gcode-file" accept=".gcode,.nc,.txt" class="sr-only">
-        <button id="gcode-check" class="btn primary grow">Проверить</button>
+        <button id="gcode-check" class="btn primary grow"
+                title="разобрать программу, посчитать траекторию и проверить, что она влезает в рабочую зону">
+          Проверить программу
+        </button>
       </div>
       <pre id="gcode-report" class="report"></pre>
     </div>
 
     <!-- ---------- калибровка ---------- -->
     <div class="tabpage" id="tab-calib">
-      <p class="hint">Платформа опускается до касания опоры; касание видно по
-        одновременному падению натяжения на всех тросах. Координаты репера
-        задаются вручную — их точность и определяет точность системы.</p>
-      <div class="mdi">
-        <label class="field"><span>X, мм</span><input id="probe-x" type="number" step="1"></label>
-        <label class="field"><span>Y, мм</span><input id="probe-y" type="number" step="1"></label>
-        <label class="field"><span>Z, мм</span><input id="probe-z" type="number" step="1" value="60"></label>
-      </div>
+      <h3>1. Геометрия модулей</h3>
+      <p class="hint">Система координат не нужна. Померьте дальномером шесть расстояний
+        между точками схода троса и рулеткой — четыре высоты модулей над полом.
+        Высоты меряются отдельно намеренно: модули стоят почти в одной плоскости,
+        и по одним расстояниям высота четвёртого определяется плохо.</p>
+      <div id="geo-distances" class="geo"></div>
+      <div id="geo-heights" class="geo"></div>
       <div class="row">
-        <button id="probe-go" class="btn primary grow">Опустить до касания</button>
-        <button id="probe-accept" class="btn">Записать точку</button>
+        <button id="geo-fit">Рассчитать</button>
+        <button id="geo-apply">Рассчитать и записать</button>
       </div>
+      <pre id="geo-report" class="report"></pre>
+
+      <h3>2. Привязка лебёдок</h3>
+      <p class="hint">Платформа сама объедет три стоянки на разной высоте.
+        На каждой измерьте дальномером расстояние от каждого модуля до платформы.
+        Разная высота нужна затем, что жёсткость лески видна только там, где
+        меняется натяжение — без неё ошибка вырастает с миллиметров до сантиметров.</p>
       <div class="row">
-        <button id="calib-solve" class="btn grow">Рассчитать</button>
-        <button id="calib-apply" class="btn grow">Рассчитать и сохранить</button>
-        <button id="calib-clear" class="btn danger">Очистить</button>
+        <label>шаг по тросам <input id="homing-step" type="number" value="400" step="50"><span class="unit">мм</span></label>
+        <button id="homing-start">Начать объезд</button>
+        <button id="homing-abort" class="ghost">Прервать</button>
+      </div>
+      <div class="progress"><div id="homing-bar"></div></div>
+      <div id="homing-phase" class="hint">не запущено</div>
+      <div id="homing-inputs" class="geo hidden"></div>
+      <div class="row">
+        <button id="homing-confirm" disabled>Записать стоянку</button>
+        <button id="homing-solve">Рассчитать</button>
+        <button id="homing-apply">Рассчитать и сохранить</button>
       </div>
       <pre id="calib-report" class="report"></pre>
     </div>
 
-    <!-- ---------- настройки ---------- -->
     <div class="tabpage" id="tab-settings">
       <div class="row">
-        <button id="settings-reload" class="btn">Обновить</button>
+        <button id="settings-reload" class="btn">Перечитать настройки</button>
         <span class="hint grow">правки сохраняются в machine.yaml, комментарии в файле остаются</span>
       </div>
       <div id="settings-body"></div>
@@ -280,7 +316,7 @@
     <!-- ---------- журнал ---------- -->
     <div class="tabpage" id="tab-log">
       <div class="row">
-        <button id="log-clear" class="btn">Очистить</button>
+        <button id="log-clear" class="btn">Очистить журнал</button>
         <span class="hint grow">последние события сверху</span>
       </div>
       <pre id="log" class="report log"></pre>

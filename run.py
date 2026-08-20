@@ -46,9 +46,27 @@ def main(argv: list[str] | None = None) -> int:
             print("Для работы без железа запустите: python run.py --sim\n")
         return 1
 
+    import socket
+
     import uvicorn
 
     from api.server import create_app
+
+    # Порт проверяем ДО запуска: иначе сообщение о занятом порте тонет в
+    # выводе, а сервер молча не поднимается, и это выглядит как поломка.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((args.host, args.port))
+    except OSError:
+        print()
+        print(f"  Порт {args.port} уже занят — скорее всего сервер уже запущен")
+        print(f"  в другом окне. Закройте его либо возьмите другой порт:")
+        print()
+        print(f"      python run.py{' --sim' if args.sim else ''} --port {args.port + 1}")
+        print()
+        return 1
+    finally:
+        probe.close()
 
     app = create_app(runtime)
 

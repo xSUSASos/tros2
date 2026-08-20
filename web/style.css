@@ -15,7 +15,7 @@
   --border-strong: #b8c0c9;
   --fg: #1f2328;
   --muted: #59636e;
-  --faint: #818b98;
+  --faint: #6e7781;
 
   --accent: #0969da;
   --accent-emphasis: #0969da;
@@ -69,7 +69,7 @@
     --border-strong: #4c545d;
     --fg: #f0f6fc;
     --muted: #9198a1;
-    --faint: #656c76;
+    --faint: #7d8590;
 
     --accent: #4493f8;
     --accent-emphasis: #1f6feb;
@@ -117,7 +117,7 @@
   --border-strong: #4c545d;
   --fg: #f0f6fc;
   --muted: #9198a1;
-  --faint: #656c76;
+  --faint: #7d8590;
 
   --accent: #4493f8;
   --accent-emphasis: #1f6feb;
@@ -462,8 +462,157 @@ input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: var(--ring);
 .field-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .field-label { font-size: 12px; color: var(--muted); min-width: 74px; }
 .field-row .value { min-width: 72px; text-align: right; font-size: 13px; }
+.unit { font-size: 12px; color: var(--muted); }
 
 .mdi { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
 .field { display: flex; flex-direction: column; gap: 3px; }
 .field span { font-size: 11px; color: var(--muted); }
 .power { display: flex; gap: 8px; }
+
+/* ======================= крестовина джога ================================= */
+.jog { display: flex; gap: 10px; align-items: stretch; }
+.jogpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; flex: 1; max-width: 264px; }
+.jogz { display: grid; grid-template-rows: repeat(2, 1fr); gap: 6px; width: 92px; }
+.j {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  min-height: 54px; padding: 4px 2px;
+  background: var(--btn-bg); color: var(--fg);
+  border: 1px solid var(--btn-border); border-radius: var(--radius);
+  cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none;
+}
+.jogpad .j { aspect-ratio: 1; }
+.j .ar { font-size: 15px; line-height: 1; color: var(--muted); }
+.j .lb { font: 600 10px/1.05 var(--font); color: var(--fg); white-space: nowrap; }
+.j .ax { font: 600 9px/1 var(--mono); color: var(--faint); letter-spacing: .02em; }
+.j:hover { background: var(--btn-hover); border-color: var(--border-strong); }
+.j.pressed { background: var(--accent-emphasis); border-color: var(--accent-emphasis); color: #fff; }
+.j.pressed .ar, .j.pressed .lb { color: #fff; }
+.j.pressed .ax { color: rgba(255, 255, 255, .8); }
+.j.diag .ar { font-size: 13px; }
+.j.diag .lb { font-size: 9px; }
+.j.home .ar { color: var(--accent); font-size: 17px; }
+.j.home .lb { color: var(--accent); }
+
+/* ======================= натяжение тросов ================================= */
+.cables { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; }
+.cable-head {
+  display: grid; grid-template-columns: 34px 1fr 52px 92px; gap: 8px;
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint);
+}
+.cable-head span:nth-child(3), .cable-head span:nth-child(4) { text-align: right; }
+.cable { display: grid; grid-template-columns: 34px 1fr 52px 92px; gap: 8px; align-items: center; }
+.cable-id { font: 600 12px var(--mono); color: var(--muted); }
+.bar {
+  height: 16px; position: relative; overflow: hidden;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 4px;
+}
+.bar i { position: absolute; inset: 0 auto 0 0; background: var(--success); transition: width .12s linear; }
+.bar i.low { background: var(--attention); }
+.bar i.high { background: var(--danger); }
+.bar u { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); opacity: .7; }
+.cable-val { text-align: right; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.cable-drive {
+  display: flex; align-items: center; justify-content: flex-end; gap: 5px;
+  font: 11px var(--mono); color: var(--faint);
+}
+.cable-drive .led { width: 7px; height: 7px; }
+.cable-drive.online .led { background: var(--success); box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 25%, transparent); }
+.cable-drive.alarm { color: var(--danger); }
+.cable-drive.alarm .led { background: var(--danger); box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 25%, transparent); }
+
+/* ======================= пульт программы ================================== */
+.cnc-bar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.cnc {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  padding: 11px 6px; color: #fff; border: 1px solid transparent;
+  border-radius: var(--radius); cursor: pointer; text-align: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .22);
+}
+.cnc b { font: 700 13px var(--font); letter-spacing: .07em; }
+.cnc small { font-size: 10px; opacity: .85; line-height: 1.1; }
+.cnc.start { background: linear-gradient(180deg, #2ea043, #1a7f37); border-color: #14682b; }
+.cnc.hold { background: linear-gradient(180deg, #d4a72c, #a67908); border-color: #8a6503; }
+.cnc.halt { background: linear-gradient(180deg, #e5534b, #bc2f26); border-color: #a02620; }
+.cnc:not(:disabled):hover { filter: brightness(1.08); }
+.cnc:not(:disabled):active { transform: translateY(1px); }
+.cnc:disabled { opacity: .38; cursor: not-allowed; filter: saturate(.35); }
+
+.progress {
+  height: 8px; margin-top: 12px; overflow: hidden;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 5px;
+}
+.progress div { height: 100%; width: 0; background: var(--accent-emphasis); transition: width .2s; }
+.progress-meta {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 11px; color: var(--muted); margin: 5px 0 4px;
+}
+
+/* ======================= редактор программы =============================== */
+/* высота задана явно: иначе колонка номеров растягивает блок под всю
+   программу, и на пятистах строках редактор уезжает на экран вниз */
+.editor {
+  display: flex; margin: 10px 0 8px; overflow: hidden;
+  height: 264px; min-height: 120px; max-height: 70vh; resize: vertical;
+  background: var(--canvas); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.editor:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+.gutter {
+  min-width: 40px; padding: 8px 8px 8px 10px; text-align: right; white-space: pre;
+  font-size: 12px; line-height: 1.55; color: var(--faint); user-select: none; overflow: hidden;
+  background: var(--inset); border-right: 1px solid var(--border);
+}
+.editor textarea {
+  flex: 1; height: 100%; min-height: 0; padding: 8px 10px; resize: none; overflow-y: auto;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  background: transparent; border: 0; border-radius: 0;
+}
+.editor textarea:focus { outline: none; box-shadow: none; }
+
+.report {
+  margin-top: 10px; padding: 10px; max-height: 280px; overflow: auto;
+  font: 12px/1.5 var(--mono); white-space: pre-wrap; color: var(--fg);
+  background: var(--inset); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.report:empty { display: none; }
+.report.log { max-height: 58vh; }
+
+/* ======================= настройки ======================================== */
+.group {
+  margin-top: 10px; padding: 10px 12px;
+  background: var(--inset); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.group h4 {
+  margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--accent);
+}
+.setting { display: grid; grid-template-columns: 1fr 108px; gap: 8px; align-items: center; margin: 6px 0; }
+.setting label { font-size: 12px; color: var(--muted); }
+.group .hint { margin: 3px 0; }
+
+/* ======================= узкие экраны ===================================== */
+@media (max-width: 1150px) {
+  main { grid-template-columns: 1fr; }
+  .side { position: static; max-height: none; }
+}
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 10px; }
+  .status { order: 3; width: 100%; margin-left: 0; justify-content: flex-start; }
+  .dro { grid-template-columns: 1fr; }
+  .axis-value { font-size: 24px; }
+  .jog { flex-direction: column; align-items: stretch; }
+  .jogpad { max-width: none; }
+  .jogz { width: auto; grid-template-rows: none; grid-template-columns: repeat(2, 1fr); }
+  .power { flex-direction: column; }
+}
+
+/* кнопка темы: значок плюс подпись, чтобы не гадать, что она делает */
+.icon-btn {
+  width: auto; min-height: 32px; padding: 0 10px; gap: 6px;
+  font: 500 12px var(--font); color: var(--muted); white-space: nowrap;
+}
+.icon-btn:hover { color: var(--fg); }
+.estop-face { display: block; }
+
+.geo { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
+.geo label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; }
+.geo input { padding: 5px 6px; }

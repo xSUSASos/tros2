@@ -467,6 +467,8 @@ def create_app(runtime: Runtime) -> FastAPI:
             "note": "" if hot else "изменения записаны, но применятся после перезапуска сервера",
         }
 
+    register_homing(app, runtime, state, controller)
+
     # ------------------------------------------------------------------ #
     #  Статика панели
     # ------------------------------------------------------------------ #
@@ -502,3 +504,117 @@ def _describe(runtime: Runtime) -> dict[str, Any]:
         "profile": runtime.profile.name,
         "eeprom_safe": runtime.profile.eeprom_safe,
     }
+
+
+def register_homing(app: FastAPI, runtime: Runtime, state: dict[str, Any], controller) -> None:
+    """Привязка системы: геометрия модулей и калибровка лебёдок.
+
+    Отдельным блоком, потому что это самостоятельная процедура со своим
+    порядком действий, а не одна кнопка.
+    """
+    from cdpr.calibration import identify_from_ranges
+    from cdpr.geometry_fit import PAIRS, fit_modules
+    from cdpr.modes.autohoming import AutoHoming, default_deltas
+
+    @app.post("/api/geometry/fit")
+    def geometry_fit(request: schemas.GeometryFitRequest) -> dict[str, Any]:
+        n = runtime.machine.n_cables
+        if len(request.heights_mm) != n:
+            raise HTTPException(status_code=400,
+                                detail=f"нужно {n} высот модулей, передано {len(request.heights_mm)}")
+        try:
+            fit = fit_modules(request.distances_mm, request.heights_mm, n=n)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        ids = [a.id for a in runtime.machine.geometry.anchors]
+        payload = {
+            "ok": fit.ok,
+            "summary": fit.summary(ids),
+            "residual_rms_mm": round(fit.residual_rms_mm, 2),
+            "warnings": fit.warnings,
+            "positions": [[round(float(v), 1) for v in p] for p in fit.positions],
+            "pairs": [list(p) for p in PAIRS],
+        }
+        if request.apply:
+            if not fit.ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail="замеры не сходятся между собой, записывать такую геометрию нельзя: "
+                           + "; ".join(fit.warnings))
+            updates = {}
+            for i, position in enumerate(fit.positions):
+                updates[f"geometry.anchors.{i}.pos"] = [round(float(v), 1) for v in position]
+            patch_yaml(runtime.machine_path, updates)
+            payload["applied"] = True
+            payload["note"] = ("координаты модулей записаны в machine.yaml; "
+                               "перезапустите сервер, затем пройдите привязку лебёдок")
+        return payload
+
+    @app.post("/api/homing/start")
+    def homing_start(request: schemas.HomingStartRequest) -> dict[str, Any]:
+        mode = AutoHoming(default_deltas(request.step_mm), feed_mms=request.feed_mms)
+        state["homing"] = mode
+        controller().set_mode(mode)
+        return {"ok": True, "stations": len(mode.plan),
+                "note": "платформа объедет стоянки; на каждой измерьте расстояния дальномером"}
+
+    @app.get("/api/homing/status")
+    def homing_status() -> dict[str, Any]:
+        mode = state.get("homing")
+        if not isinstance(mode, AutoHoming):
+            return {"running": False, "stations": 0}
+        return {
+            "running": controller().mode is mode,
+            "phase": mode.phase,
+            "waiting": mode.waiting,
+            "index": mode.index,
+            "total": len(mode.plan),
+            "label": mode.current_label,
+            "stations": len(mode.stations),
+            "progress": round(mode.progress, 3),
+        }
+
+    @app.post("/api/homing/confirm")
+    def homing_confirm(request: schemas.HomingConfirmRequest) -> dict[str, Any]:
+        mode = state.get("homing")
+        if not isinstance(mode, AutoHoming):
+            raise HTTPException(status_code=409, detail="привязка не запущена")
+        try:
+            station = mode.confirm(request.distances_mm, controller())
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "stations": len(mode.stations), "label": station.label,
+                "tensions_n": None if station.tensions_n is None
+                else [round(float(v), 1) for v in station.tensions_n]}
+
+    @app.post("/api/homing/abort")
+    def homing_abort() -> dict[str, Any]:
+        mode = state.get("homing")
+        if isinstance(mode, AutoHoming):
+            mode.abort()
+        controller().set_mode(IdleMode())
+        return {"ok": True}
+
+    @app.post("/api/homing/solve")
+    def homing_solve(request: schemas.HomingSolveRequest) -> dict[str, Any]:
+        mode = state.get("homing")
+        if not isinstance(mode, AutoHoming) or len(mode.stations) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"нужно минимум две стоянки, снято "
+                       f"{0 if not isinstance(mode, AutoHoming) else len(mode.stations)}")
+        result = identify_from_ranges(runtime.machine, mode.stations,
+                                      fit_elasticity=request.fit_elasticity)
+        payload = {
+            "ok": result.ok,
+            "summary": result.summary(),
+            "residual_rms_mm": round(result.residual_rms_mm, 3),
+            "warnings": result.warnings,
+            "updates": result.as_updates(),
+        }
+        if request.apply and result.ok:
+            save_calibration(result.as_updates(), runtime.machine_path)
+            payload["applied"] = True
+            payload["note"] = "записано в machine.yaml; перезапустите сервер"
+        return payload

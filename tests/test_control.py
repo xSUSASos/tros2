@@ -173,8 +173,8 @@ def test_landing_is_detected_by_tension_collapse(rt):
 
 
 def test_calibration_recovers_position_accuracy(machine):
-    """Проверка по назначению: после калибровки по реперам положение должно
-    считаться с точностью, сравнимой с точностью разметки этих реперов."""
+    """Проверка по назначению: после калибровки по точкам посадки положение должно
+    считаться с точностью, сравнимой с точностью разметки этих точек посадки."""
     import numpy as np
 
     from cdpr.kinematics import CDPRKinematics

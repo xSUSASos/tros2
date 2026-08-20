@@ -50,17 +50,29 @@ class JogMode(Mode):
     def __init__(self, feed_mms: float | None = None) -> None:
         self.feed = feed_mms
         self._target: np.ndarray | None = None
+        self._pending = np.zeros(3)
         self._continuous = np.zeros(3)
         self._lock = threading.RLock()
 
     def enter(self, ctx) -> None:  # noqa: ANN001
         pose = ctx.state.pose_mm
-        self._target = None if pose is None else pose.copy()
+        with self._lock:
+            self._target = None if pose is None else pose + self._pending
+            if pose is not None:
+                self._pending = np.zeros(3)
 
     def step(self, delta_mm) -> None:
-        """Шаг по осям, например +10 мм по X."""
+        """Шаг по осям, например +10 мм по X.
+
+        Режим включается панелью и тем же запросом получает первый шаг, а
+        `enter()` отработает только в начале следующего цикла. Поэтому шаги,
+        пришедшие до входа в режим, копятся отдельно, иначе первое нажатие
+        крестовины пропадало бы впустую.
+        """
         with self._lock:
-            if self._target is not None:
+            if self._target is None:
+                self._pending = self._pending + np.asarray(delta_mm, dtype=float)
+            else:
                 self._target = self._target + np.asarray(delta_mm, dtype=float)
 
     def set_continuous(self, velocity_mms) -> None:
@@ -77,7 +89,8 @@ class JogMode(Mode):
             return ModeOutput.idle("положение неизвестно — нужна калибровка")
         with self._lock:
             if self._target is None:
-                self._target = pose.copy()
+                self._target = pose + self._pending
+                self._pending = np.zeros(3)
             if np.any(self._continuous):
                 self._target = self._target + self._continuous * dt
             target = np.clip(self._target, ctx.box_low, ctx.box_high)
